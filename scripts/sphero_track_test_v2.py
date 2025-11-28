@@ -11,6 +11,14 @@ import types
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from ultralytics import YOLO
+from pathlib import Path  # NEW
+
+# --- PATHS (relative to repository root) ---
+# This file lives in:  sphero/scripts/sphero_track_test_v2.py
+# So BASE_DIR is:      sphero/
+BASE_DIR = Path(__file__).resolve().parent.parent
+MODELS_DIR = BASE_DIR / "models"
+LOGS_DIR = BASE_DIR / "logs"
 
 # --- STUBBING PLOTTING LIBS (ultralytics sometimes imports these) ---
 fake_pandas = types.ModuleType("pandas")
@@ -543,7 +551,14 @@ def main():
         return
 
     print("Loading YOLO model...")
-    model = YOLO("yolov8s-seg.pt")
+    model_path = MODELS_DIR / "yolov8s-seg.pt"   # NEW
+    if model_path.exists():
+        print(f"[YOLO] Using weights at {model_path}")
+        model = YOLO(str(model_path))
+    else:
+        # Fallback so it still works if someone drops the weights in CWD
+        print(f"[YOLO] WARNING: {model_path} not found, falling back to 'yolov8s-seg.pt' in CWD")
+        model = YOLO("yolov8s-seg.pt")
 
     # Ball tracker for robust detection
     ball_tracker = Tracker(process_noise=0.01, measurement_noise=1.0)
@@ -617,8 +632,9 @@ def main():
         )
 
         # ---- SETUP LOGGING ----
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)  # NEW: ensure logs/ exists
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        log_filename = f"sphero_log_{ts}.csv"
+        log_filename = LOGS_DIR / f"sphero_log_{ts}.csv"  # NEW: logs folder
         log_file = open(log_filename, mode="w", newline="")
         log_writer = csv.writer(log_file)
         log_writer.writerow([
