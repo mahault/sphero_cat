@@ -1,718 +1,11 @@
-# import sys
-# sys.coinit_flags = 0
-
-# import time
-# import math
-# import numpy as np
-# import cv2
-# import types
-# import copy
-
-# # --- STUBBING ---
-# fake_pandas = types.ModuleType("pandas")
-# sys.modules["pandas"] = fake_pandas
-# sys.modules["seaborn"] = types.ModuleType("seaborn")
-# sys.modules["matplotlib"] = types.ModuleType("matplotlib")
-# sys.modules["matplotlib.pyplot"] = types.ModuleType("matplotlib.pyplot")
-
-# from spherov2 import scanner
-# from spherov2.sphero_edu import SpheroEduAPI
-# from spherov2.types import Color
-# from pymdp.agent import Agent
-# from ultralytics import YOLO
-
-# # ================= CONFIGURATION =================
-
-# CAM_INDEX = 1
-
-# # --- VISION SETTINGS ---
-# MIN_BRIGHTNESS = 150   
-# MIN_CIRCULARITY = 0.5  
-# MIN_ASPECT_RATIO = 0.75 
-# MIN_RADIUS_PX = 8
-# MAX_RADIUS_PX = 80
-
-# CAT_CONFIDENCE = 0.65
-# PIXELS_PER_CM = 2.5
-# SLIP_FACTOR = 0.5
-# LOOP_DELAY = 0.05
-
-# # --- GRID ---
-# N_STATES = 9
-# N_OBS = 9
-
-# # ================= MATH HELPERS =================
-
-# def angle_diff(a, b):
-#     """ Calculates smallest difference between two angles (-180 to 180) """
-#     diff = (a - b + 180) % 360 - 180
-#     return diff
-
-# def normalize_angle(a):
-#     return a % 360
-
-# # ================= KALMAN FILTER =================
-
-# class SpheroKalmanFilter:
-#     def __init__(self, start_x, start_y, dt):
-#         self.dt = dt
-#         self.x = np.array([start_x, start_y, 0, 0], dtype=float)
-#         self.P = np.eye(4) * 50.0 
-#         self.F = np.array([[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]])
-#         self.H = np.array([[1, 0, 0, 0], [0, 1, 0, 0]])
-#         self.Q = np.eye(4) * 0.1 
-#         self.R = np.eye(2) * 1.0 
-
-#     def predict(self, control_vx, control_vy):
-#         # Note: We rely less on control inputs now because orientation might be wrong
-#         # We trust the "Process Noise" (Q) to allow the filter to follow visual data
-#         self.x = self.F @ self.x
-#         # Fusion (Weakly pull towards control to help smoothness)
-#         self.x[2] = self.x[2]*0.9 + control_vx*0.1
-#         self.x[3] = self.x[3]*0.9 + control_vy*0.1
-#         self.P = self.F @ self.P @ self.F.T + self.Q
-
-#     def update(self, meas_x, meas_y):
-#         z = np.array([meas_x, meas_y])
-#         y = z - (self.H @ self.x)
-#         S = self.H @ self.P @ self.H.T + self.R
-#         K = self.P @ self.H.T @ np.linalg.inv(S)
-#         self.x = self.x + (K @ y)
-#         self.P = (np.eye(4) - (K @ self.H)) @ self.P
-
-#     def force_state(self, x, y):
-#         self.x[0] = x; self.x[1] = y
-#         self.x[2] = 0; self.x[3] = 0
-#         self.P = np.eye(4) * 10.0
-
-#     def get_state(self):
-#         return int(self.x[0]), int(self.x[1])
-
-#     def get_uncertainty(self):
-#         return int(np.sqrt((self.P[0,0] + self.P[1,1])/2) * 3)
-
-# # ================= POMDP AGENT =================
-
-# def obj_array(n): return np.empty(n, dtype=object)
-
-# def build_cat_tracker_agent():
-#     A = obj_array(1); A[0] = np.eye(N_OBS)
-#     B = obj_array(1); B[0] = np.eye(N_STATES).reshape(N_STATES, N_STATES, 1)
-#     C = obj_array(1); C[0] = np.zeros(N_OBS)
-#     D = obj_array(1); D[0] = np.ones(N_STATES) / N_STATES
-#     return Agent(A=A, B=B, C=C, D=D)
-
-# # ================= VISION =================
-
-# def find_sphero_strict(frame):
-#     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-#     _, thresh = cv2.threshold(gray, MIN_BRIGHTNESS, 255, cv2.THRESH_BINARY)
-#     kernel = np.ones((5,5), np.uint8)
-#     thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-#     contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-#     best_circle = None
-#     max_score = 0
-    
-#     for c in contours:
-#         area = cv2.contourArea(c)
-#         if area < MIN_RADIUS_PX**2: continue
-#         perimeter = cv2.arcLength(c, True)
-#         if perimeter == 0: continue
-#         circularity = (4 * math.pi * area) / (perimeter ** 2)
-#         if circularity < MIN_CIRCULARITY: continue
-        
-#         # Aspect Ratio
-#         if len(c) < 5: continue
-#         (center, (axis1, axis2), angle) = cv2.fitEllipse(c)
-#         major_axis = max(axis1, axis2)
-#         minor_axis = min(axis1, axis2)
-#         if major_axis == 0: continue
-#         if (minor_axis / major_axis) < MIN_ASPECT_RATIO: continue
-
-#         if area > max_score:
-#             max_score = area
-#             best_circle = (int(center[0]), int(center[1]), int(major_axis/2))
-
-#     if best_circle: return best_circle, True, thresh 
-#     return (0,0,0), False, thresh
-
-# def get_grid_center(cell_idx, w, h):
-#     row = cell_idx // 3; col = cell_idx % 3
-#     return (col * (w//3)) + (w // 6), (row * (h//3)) + (h // 6)
-
-
-# def find_sphero_robust(frame):
-#     """
-#     Combines Color (HSV), Brightness, and Blob Shape to find the Sphero.
-#     Assumes Sphero is set to RED Color.
-#     """
-#     # 1. Pre-processing
-#     blurred = cv2.GaussianBlur(frame, (5, 5), 0)
-#     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
-#     gray = cv2.cvtColor(blurred, cv2.COLOR_BGR2GRAY)
-
-#     # 2. COLOR MASK (Looking for RED)
-#     # Red in HSV wraps around 0/180. We need two ranges.
-#     # Range 1: 0-10 (Red)
-#     lower_red1 = np.array([0, 120, 100]) 
-#     upper_red1 = np.array([10, 255, 255])
-#     # Range 2: 170-180 (Red)
-#     lower_red2 = np.array([170, 120, 100]) 
-#     upper_red2 = np.array([180, 255, 255])
-    
-#     mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
-#     mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
-#     color_mask = cv2.bitwise_or(mask1, mask2)
-
-#     # 3. BRIGHTNESS MASK (Relaxed threshold)
-#     # We lower the brightness req because the Color requirement is strict
-#     _, bright_mask = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY)
-
-#     # 4. COMBINE MASKS (Intersection)
-#     # Must be RED AND BRIGHT(ish)
-#     combined_mask = cv2.bitwise_and(color_mask, bright_mask)
-
-#     # Clean up noise (Dilate to merge the broken LED parts into one blob)
-#     kernel = np.ones((5, 5), np.uint8)
-#     combined_mask = cv2.dilate(combined_mask, kernel, iterations=2)
-#     combined_mask = cv2.erode(combined_mask, kernel, iterations=1)
-
-#     # 5. Find Contours
-#     contours, _ = cv2.findContours(combined_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-#     best_circle = None
-#     max_score = 0
-
-#     for c in contours:
-#         area = cv2.contourArea(c)
-#         if area < MIN_RADIUS_PX**2: continue # Too small
-        
-#         # Geometry calculations
-#         ((x, y), radius) = cv2.minEnclosingCircle(c)
-        
-#         # --- SCORING SYSTEM ---
-        
-#         # 1. Circularity Score (How round is it?)
-#         perimeter = cv2.arcLength(c, True)
-#         if perimeter == 0: continue
-#         circularity = (4 * math.pi * area) / (perimeter ** 2)
-        
-#         # 2. Size Score (Is it a reasonable size?)
-#         # Penalize if it's massive (glare on wall) or tiny
-#         size_score = 1.0
-#         if radius > MAX_RADIUS_PX: size_score = 0.2
-        
-#         # 3. Color Density Score
-#         # Check the original color mask to ensure this blob is actually red
-#         # (prevents white lights from passing if they happen to overlap slightly)
-#         mask_roi = np.zeros_like(gray)
-#         cv2.drawContours(mask_roi, [c], -1, 255, -1)
-#         # Calculate mean brightness of this contour in the Color Mask
-#         mean_val = cv2.mean(color_mask, mask=mask_roi)[0]
-#         color_confidence = mean_val / 255.0
-
-#         # FINAL SCORE
-#         # We weigh Color Confidence heavily.
-#         total_score = (circularity * 0.3) + (color_confidence * 0.7) * size_score
-
-#         if total_score > max_score and total_score > 0.4:
-#             max_score = total_score
-#             best_circle = (int(x), int(y), int(radius))
-
-#     found = best_circle is not None
-    
-#     # Return a tuple consistent with your loop
-#     if not found:
-#         return (0, 0, 0), False, combined_mask
-    
-#     return best_circle, True, combined_mask
-
-# # ================= MAIN LOOP =================
-
-# def main():
-#     print("Scanning for Sphero...")
-#     toy = scanner.find_toy()
-#     if not toy: print("No Sphero found."); return
-
-#     print("Loading YOLO...")
-#     cat_model = YOLO("yolov8n.pt") 
-#     agent = build_cat_tracker_agent()
-
-#     with SpheroEduAPI(toy) as droid:
-#         droid.set_main_led(Color(255, 0, 0)) 
-#         try: droid.set_matrix_character("O", Color(255, 0, 0)) 
-#         except: pass 
-
-#         cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_DSHOW)
-#         if not cap.isOpened(): cap = cv2.VideoCapture(CAM_INDEX)
-        
-#         # --- SELF-CALIBRATION VARIABLES ---
-#         calibration_offset = 0.0 # The inferred rotation of the robot
-#         last_pos = None
-#         last_time = time.time()
-#         last_command_heading = None
-#         is_moving = False
-
-#         kf = SpheroKalmanFilter(640//2, 480//2, LOOP_DELAY)
-#         qs = copy.deepcopy(agent.D) 
-
-#         print("--- STARTED (AUTO-CALIBRATION MODE) ---")
-        
-#         try:
-#             while True:
-#                 loop_start = time.time()
-#                 ret, frame = cap.read()
-#                 if not ret: break
-#                 h, w = frame.shape[:2]
-                
-#                 (sx, sy, sr), sphero_found, debug_mask = find_sphero_robust(frame)
-                
-#                 # --- UPDATE KALMAN ---
-#                 # We ignore motor telemetry for prediction initially because we don't know direction
-#                 kf.predict(0, 0) 
-                
-#                 if sphero_found:
-#                     if kf.get_uncertainty() > 100: kf.force_state(sx, sy)
-#                     else: kf.update(sx, sy)
-#                     cv2.circle(frame, (sx, sy), sr, (0, 255, 0), 2)
-
-#                 est_sx, est_sy = kf.get_state()
-#                 uncert = kf.get_uncertainty()
-
-#                 # --- AUTO CALIBRATION LOGIC ---
-#                 curr_time = time.time()
-#                 dt = curr_time - last_time
-                
-#                 if sphero_found and last_pos is not None and is_moving and last_command_heading is not None:
-#                     # 1. Calculate Visual Vector
-#                     dx = est_sx - last_pos[0]
-#                     dy = last_pos[1] - est_sy # Flip Y (Screen Up is Positive)
-                    
-#                     dist_moved = math.sqrt(dx**2 + dy**2)
-                    
-#                     # Only calibrate if moved significantly (reject jitter)
-#                     if dist_moved > 5:
-#                         # 2. Calculate Visual Angle (0=Up, 90=Right)
-#                         vis_angle = math.degrees(math.atan2(dx, dy))
-                        
-#                         # 3. Calculate Difference (Visual - Command)
-#                         # e.g. Vis=90 (Right), Cmd=0 (Up) -> Diff = +90
-#                         instant_offset = angle_diff(vis_angle, last_command_heading)
-                        
-#                         # 4. Update Global Offset (Running Average for smoothness)
-#                         # Learn fast at first (0.2), then stabilize
-#                         alpha = 0.1 
-#                         calibration_offset += alpha * angle_diff(instant_offset, calibration_offset)
-#                         calibration_offset = normalize_angle(calibration_offset)
-
-#                 last_pos = (est_sx, est_sy)
-#                 last_time = curr_time
-
-#                 # --- CAT DETECTION ---
-#                 results = cat_model(frame, stream=True, verbose=False, conf=CAT_CONFIDENCE)
-#                 observed_cat_cell = None
-#                 cat_box = None
-#                 for r in results:
-#                     for box in r.boxes:
-#                         if "cat" in cat_model.names[int(box.cls[0])].lower():
-#                             x1, y1, x2, y2 = map(int, box.xyxy[0])
-#                             cx, cy = (x1+x2)//2, (y1+y2)//2
-#                             col = min(2, max(0, int(cx / (w/3))))
-#                             row = min(2, max(0, int(cy / (h/3))))
-#                             observed_cat_cell = row * 3 + col
-#                             cat_box = (x1, y1, x2, y2)
-#                             break 
-#                     if observed_cat_cell is not None: break
-
-#                 if observed_cat_cell is not None:
-#                     qs = agent.infer_states([observed_cat_cell])
-                
-#                 likely_cat_cell = np.argmax(qs[0])
-#                 confidence_cat = qs[0][likely_cat_cell]
-
-#                 # --- NAVIGATION ---
-#                 should_move = False
-#                 target_angle = 0
-                
-#                 if confidence_cat > 0.4 and uncert < 150:
-#                     tx, ty = get_grid_center(likely_cat_cell, w, h)
-#                     dx = tx - est_sx
-#                     dy = est_sy - ty # Flip Y
-                    
-#                     if math.sqrt(dx*dx + dy*dy) > 60:
-#                         # 1. Calculate Desired Visual Angle
-#                         desired_vis_angle = math.degrees(math.atan2(dx, dy))
-                        
-#                         # 2. Subtract Offset to get Command Angle
-#                         # Cmd = Vis - Offset
-#                         target_angle = normalize_angle(desired_vis_angle - calibration_offset)
-                        
-#                         should_move = True
-#                         cv2.line(frame, (est_sx, est_sy), (tx, ty), (255, 255, 0), 2)
-
-#                 if should_move:
-#                     droid.set_heading(int(target_angle))
-#                     droid.set_speed(80) # Slower speed helps calibration
-#                     last_command_heading = target_angle
-#                     is_moving = True
-#                     status = f"CHASING (Offset: {int(calibration_offset)})"
-#                 else:
-#                     droid.set_speed(0)
-#                     is_moving = False
-#                     status = "WAITING / LOST"
-
-#                 # --- DRAWING ---
-#                 cv2.drawMarker(frame, (est_sx, est_sy), (0,0,255), cv2.MARKER_CROSS, 20, 2)
-#                 cv2.circle(frame, (est_sx, est_sy), uncert, (255,0,0), 1)
-#                 if cat_box: cv2.rectangle(frame, (cat_box[0], cat_box[1]), (cat_box[2], cat_box[3]), (0,0,255), 2)
-                
-#                 # Grid
-#                 for i in range(1,3):
-#                     cv2.line(frame, (i*(w//3),0), (i*(w//3),h), (50,50,50), 1)
-#                     cv2.line(frame, (0,i*(h//3)), (w, i*(h//3)), (50,50,50), 1)
-
-#                 cv2.putText(frame, f"{status}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
-#                 found_col = (0,255,0) if sphero_found else (0,0,255)
-#                 cv2.putText(frame, f"Sphero: {sphero_found} | Calib: {int(calibration_offset)}deg", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, found_col, 2)
-
-#                 cv2.imshow("Auto-Calib Tracker", frame)
-#                 cv2.imshow("Debug Mask", debug_mask)
-
-#                 if cv2.waitKey(1) & 0xFF == ord('q'): break
-#                 elapsed = time.time() - loop_start
-#                 if elapsed < LOOP_DELAY: time.sleep(LOOP_DELAY - elapsed)
-
-#         except KeyboardInterrupt: pass
-#         finally:
-#             droid.set_speed(0)
-#             cap.release()
-#             cv2.destroyAllWindows()
-
-# if __name__ == "__main__":
-#     main()
-
-
-
-# import sys
-# sys.coinit_flags = 0 # Force MTA for Bluetooth
-
-# import time
-# import math
-# import numpy as np
-# import cv2
-# from concurrent.futures import ThreadPoolExecutor
-# import types
-# from ultralytics import YOLO
-
-# # --- STUBBING ---
-# fake_pandas = types.ModuleType("pandas")
-# sys.modules["pandas"] = fake_pandas
-# sys.modules["seaborn"] = types.ModuleType("seaborn")
-# sys.modules["matplotlib"] = types.ModuleType("matplotlib")
-# sys.modules["matplotlib.pyplot"] = types.ModuleType("matplotlib.pyplot")
-
-# from spherov2 import scanner
-# from spherov2.sphero_edu import SpheroEduAPI
-# from spherov2.types import Color
-
-# # ================= CONFIGURATION =================
-
-# CAM_INDEX = 1
-# LOOP_DELAY = 0.05
-
-# # --- THRESHOLDS ---
-# CAT_CONFIDENCE = 0.50
-# MIN_BALL_BRIGHTNESS = 180  # 0-255: How "glowing" must the ball be?
-# MIN_BALL_RADIUS = 10
-# MAX_BALL_RADIUS = 100
-
-# # --- COLORS (BGR) ---
-# COL_BALL = (0, 255, 0)     # Green
-# COL_CAT = (0, 0, 255)      # Red
-# COL_OBSTACLE = (255, 0, 0) # Blue
-# COL_FLOOR = (100, 100, 100)# Gray
-
-# # --- YOLO CLASS IDs ---
-# CLS_PERSON = 0
-# CLS_CAT = 15
-# CLS_DOG = 16
-# CLS_CHAIR = 56
-# CLS_COUCH = 57
-# CLS_BED = 59
-# OBSTACLE_CLASSES = [CLS_PERSON, CLS_CHAIR, CLS_COUCH, CLS_BED]
-
-# # ================= VISION PIPELINE =================
-
-# def get_floor_mask(frame, obstacle_mask):
-#     """
-#     Identifies the floor using a Flood Fill algorithm.
-#     1. Starts at the bottom-center of the screen (assumed to be floor).
-#     2. Expands outward finding similarly colored pixels.
-#     3. Stops at walls (dark/different color) or Obstacles (YOLO mask).
-#     """
-#     h, w = frame.shape[:2]
-    
-#     # 1. Downsample for speed
-#     small = cv2.resize(frame, (w//4, h//4))
-#     h_s, w_s = small.shape[:2]
-    
-#     # 2. Create a mask for floodFill (needs to be +2 pixels larger)
-#     # We pre-fill it with the YOLO obstacles so floodFill stops there.
-#     fill_mask = np.zeros((h_s+2, w_s+2), np.uint8)
-    
-#     # Resize obstacle mask to match downsampled size
-#     obs_small = cv2.resize(obstacle_mask, (w_s, h_s), interpolation=cv2.INTER_NEAREST)
-#     fill_mask[1:-1, 1:-1] = obs_small # Embed obstacles
-    
-#     # 3. Flood Fill Seed Point (Bottom Center)
-#     seed_pt = (w_s//2, h_s - 5)
-    
-#     # Check if seed is valid (not already an obstacle)
-#     if fill_mask[seed_pt[1]+1, seed_pt[0]+1] == 0:
-#         # Flood fill similar colors (tolerance of 30)
-#         cv2.floodFill(small, fill_mask, seed_pt, (255, 255, 255), (30,)*3, (30,)*3, flags=8 | (255 << 8))
-    
-#     # 4. Extract the "Filled" area (which is marked with 255 in the mask)
-#     # The mask is +2 larger, crop it.
-#     floor_mask_small = fill_mask[1:-1, 1:-1]
-    
-#     # 5. Resize back up
-#     floor_mask = cv2.resize(floor_mask_small, (w, h), interpolation=cv2.INTER_NEAREST)
-    
-#     # Ensure it's binary
-#     _, floor_mask = cv2.threshold(floor_mask, 128, 255, cv2.THRESH_BINARY)
-    
-#     return floor_mask
-
-# def detect_glowing_circle(frame):
-#     """
-#     Finds the Sphero by looking for a Geometric Circle that is also Bright.
-#     This ignores complex shapes (hands) and focuses on the glowing LED.
-#     """
-#     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    
-#     # 1. Hough Circle Transform (Geometry)
-#     circles = cv2.HoughCircles(
-#         gray, 
-#         cv2.HOUGH_GRADIENT, 
-#         dp=1.5,           # Inverse ratio of resolution
-#         minDist=50,       # Min dist between circles
-#         param1=150,       # Canny edge threshold (High to avoid noise)
-#         param2=30,        # Center detection threshold (Lower = more sensitive)
-#         minRadius=MIN_BALL_RADIUS, 
-#         maxRadius=MAX_BALL_RADIUS
-#     )
-    
-#     best_ball = None
-    
-#     if circles is not None:
-#         circles = np.uint16(np.around(circles))
-#         for i in circles[0, :]:
-#             cx, cy, r = i[0], i[1], i[2]
-            
-#             # 2. Brightness Check (Luminosity)
-#             # Create a mask for this specific circle
-#             mask = np.zeros_like(gray)
-#             cv2.circle(mask, (cx, cy), r, 255, -1)
-            
-#             # Calculate average brightness inside this circle
-#             mean_val = cv2.mean(gray, mask=mask)[0]
-            
-#             if mean_val > MIN_BALL_BRIGHTNESS:
-#                 # Found it!
-#                 best_ball = (cx, cy, r)
-#                 break # Return the first/strongest one
-                
-#     return best_ball
-
-# def process_vision(frame, model):
-#     h, w = frame.shape[:2]
-    
-#     # --- 1. YOLO INFERENCE (Obstacles & Cat) ---
-#     results = model(frame, verbose=False, conf=0.25)
-#     result = results[0]
-    
-#     # Masks
-#     obstacle_mask = np.zeros((h, w), dtype=np.uint8)
-#     cat_mask = np.zeros((h, w), dtype=np.uint8)
-#     cat_found = False
-#     cat_center = None
-    
-#     if result.masks is not None:
-#         masks = result.masks.data.cpu().numpy()
-#         boxes = result.boxes
-        
-#         for i, box in enumerate(boxes):
-#             cls_id = int(box.cls[0])
-            
-#             # Resize YOLO mask to frame size
-#             m = cv2.resize(masks[i], (w, h))
-#             binary_m = (m > 0.5).astype(np.uint8)
-            
-#             if cls_id in OBSTACLE_CLASSES:
-#                 obstacle_mask = cv2.bitwise_or(obstacle_mask, binary_m)
-#             elif cls_id == CLS_CAT:
-#                 if box.conf[0] > CAT_CONFIDENCE:
-#                     cat_mask = cv2.bitwise_or(cat_mask, binary_m)
-#                     cat_found = True
-#                     # Calculate center
-#                     x1, y1, x2, y2 = map(int, box.xyxy[0])
-#                     cat_center = ((x1+x2)//2, (y1+y2)//2)
-
-#     # --- 2. FLOOR DETECTION ---
-#     # Use flood fill, avoiding the known obstacles
-#     floor_mask = get_floor_mask(frame, obstacle_mask)
-    
-#     # --- 3. BALL DETECTION (Geometric + Brightness) ---
-#     ball_data = detect_glowing_circle(frame)
-    
-#     # --- 4. BUILD VISUALIZATION ---
-#     # Create a colored overlay
-#     overlay = np.zeros((h, w, 3), dtype=np.uint8)
-    
-#     # Paint Floor (Gray)
-#     overlay[floor_mask == 255] = COL_FLOOR
-#     # Paint Obstacles (Blue) - Overwrite floor
-#     overlay[obstacle_mask == 1] = COL_OBSTACLE
-#     # Paint Cat (Red)
-#     overlay[cat_mask == 1] = COL_CAT
-    
-#     # Paint Ball (Green) - Manually draw the circle on the overlay
-#     if ball_data:
-#         cx, cy, r = ball_data
-#         cv2.circle(overlay, (cx, cy), r, COL_BALL, -1) # Filled green circle
-        
-#     return overlay, floor_mask, cat_found, cat_center, ball_data
-
-# # ================= MAIN LOOP =================
-
-# def main():
-#     print("Scanning for Sphero...")
-    
-#     # Threaded scan
-#     toy = None
-#     with ThreadPoolExecutor(max_workers=1) as executor:
-#         future = executor.submit(scanner.find_toy)
-#         try: toy = future.result(timeout=10)
-#         except: pass
-
-#     if not toy: print("No Sphero found."); return
-
-#     print("Loading YOLOv8 Segmentation...")
-#     model = YOLO("yolov8s-seg.pt") 
-    
-#     with SpheroEduAPI(toy) as droid:
-#         # Set LED to Bright White to help the "Glowing" detector
-#         droid.set_main_led(Color(255, 255, 255)) 
-#         droid.set_speed(0)
-
-#         cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_DSHOW)
-#         if not cap.isOpened(): cap = cv2.VideoCapture(CAM_INDEX)
-        
-#         # State
-#         calibration_offset = 0.0
-#         last_pos = None
-#         last_heading = 0
-        
-#         print("--- SYSTEM READY ---")
-        
-#         try:
-#             while True:
-#                 loop_start = time.time()
-#                 ret, frame = cap.read()
-#                 if not ret: break
-                
-#                 # 1. VISION PROCESSING
-#                 overlay, floor_mask, cat_found, cat_center, ball_data = process_vision(frame, model)
-                
-#                 # 2. BLEND IMAGES (0.6 Original + 0.4 Overlay)
-#                 vis_frame = cv2.addWeighted(frame, 0.6, overlay, 0.4, 0)
-                
-#                 # 3. LOGIC
-#                 status = "IDLE"
-#                 should_move = False
-#                 target_angle = 0
-                
-#                 if ball_data:
-#                     bx, by, _ = ball_data
-                    
-#                     # AUTO-CALIBRATION (Only when moving)
-#                     if last_pos:
-#                         dx, dy = bx - last_pos[0], last_pos[1] - by # Flip Y
-#                         if math.sqrt(dx**2 + dy**2) > 5:
-#                             vis_angle = math.degrees(math.atan2(dx, dy))
-#                             diff = (vis_angle - last_heading + 180) % 360 - 180
-#                             calibration_offset += 0.1 * diff # Soft update
-                            
-#                     last_pos = (bx, by)
-                    
-#                     # NAVIGATION LOGIC
-#                     if cat_found and cat_center:
-#                         cx, cy = cat_center
-                        
-#                         # Check if Ball is on the Floor
-#                         # (Access floor mask at ball coordinates)
-#                         # Safe bounds check
-#                         if 0 <= by < floor_mask.shape[0] and 0 <= bx < floor_mask.shape[1]:
-#                             is_on_floor = floor_mask[by, bx] == 255
-#                         else:
-#                             is_on_floor = False
-                        
-#                         if is_on_floor:
-#                             # Calculate Vector to Cat
-#                             vec_x = cx - bx
-#                             vec_y = by - cy # Screen Y is inverted
-                            
-#                             dist = math.sqrt(vec_x**2 + vec_y**2)
-                            
-#                             if dist > 80: # Don't ram the cat
-#                                 desired_angle = math.degrees(math.atan2(vec_x, vec_y))
-#                                 target_angle = (desired_angle - calibration_offset) % 360
-#                                 should_move = True
-#                                 status = "CHASING CAT"
-#                                 cv2.line(vis_frame, (bx, by), (cx, cy), (0, 255, 0), 2)
-#                         else:
-#                             status = "BALL NOT ON FLOOR"
-#                     else:
-#                         status = "NO CAT DETECTED"
-#                 else:
-#                     status = "BALL LOST"
-
-#                 # 4. EXECUTE
-#                 if should_move:
-#                     droid.set_heading(int(target_angle))
-#                     droid.set_speed(60)
-#                     last_heading = target_angle
-#                 else:
-#                     droid.set_speed(0)
-
-#                 # 5. DRAW HUD
-#                 cv2.putText(vis_frame, f"STATUS: {status}", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-#                 if ball_data:
-#                     cv2.circle(vis_frame, (ball_data[0], ball_data[1]), 5, (255,255,255), -1)
-
-#                 cv2.imshow("Semantic Eye", vis_frame)
-                
-#                 if cv2.waitKey(1) & 0xFF == ord('q'): break
-#                 elapsed = time.time() - loop_start
-#                 if elapsed < LOOP_DELAY: time.sleep(LOOP_DELAY - elapsed)
-
-#         except KeyboardInterrupt: pass
-#         finally:
-#             droid.set_speed(0)
-#             cap.release()
-#             cv2.destroyAllWindows()
-
-# if __name__ == "__main__":
-#     main()
-
-
 import sys
-sys.coinit_flags = 0 
+sys.coinit_flags = 0  # required on Windows for COM (camera + BT)
 
 import time
 import math
+import types
+from collections import deque
+
 import numpy as np
 import cv2
 from concurrent.futures import ThreadPoolExecutor
@@ -722,250 +15,305 @@ from spherov2 import scanner
 from spherov2.sphero_edu import SpheroEduAPI
 from spherov2.types import Color
 
+# ---- Stub out pandas/matplotlib if missing (ultralytics sometimes assumes them) ----
+fake_pandas = types.ModuleType("pandas")
+sys.modules["pandas"] = fake_pandas
+sys.modules["seaborn"] = types.ModuleType("seaborn")
+sys.modules["matplotlib"] = types.ModuleType("matplotlib")
+sys.modules["matplotlib.pyplot"] = types.ModuleType("matplotlib.pyplot")
+
 # ================= CONFIGURATION =================
 
 CAM_INDEX = 1
-LOOP_DELAY = 0.05
+LOOP_DELAY = 0.05          # ~20 FPS
+
+# --- LATENCY ESTIMATION ---
+LATENCY_INIT = 0.18              # Initial guess (seconds)
+LATENCY_MAX_FOR_PRED = 0.10      # Cap prediction horizon at 100 ms
+LATENCY_SPEED_EVENT_THRESHOLD = 10  # speed above which we consider "moving"
+LATENCY_MOVE_THRESH_PX = 5.0     # movement to detect motion onset
+LATENCY_BETA = 0.3               # smoothing for latency estimate
 
 # --- NAVIGATION & SAFETY ---
-MAX_SPEED = 45              # Reduced max speed for better control
-MIN_SPEED = 15              # Lower minimum for gentle approach
-TOUCH_DISTANCE = 80         # Increased stopping distance (accounts for momentum)
-BRAKE_DISTANCE = 150        # Start aggressive braking
-BORDER_MARGIN = 50          # Pixels from edge to trigger safety stop
+MAX_SPEED = 30             # Max pursuit speed
+MIN_SPEED = 6              # Min approach speed
+TARGET_REACHED_PIX = 35    # px, target arrival threshold
+BRAKE_TIME = 0.3           # seconds, braking time constant for velocity-aware stopping
+BORDER_MARGIN = 100        # px from edge
+PREDICT_HORIZON_SEC = 0.4  # Prediction horizon for exit check
+STUCK_DIST_THRESHOLD = 2   # px/frame threshold for "no movement"
+STUCK_FRAMES_THRESHOLD = 10  # frames of no movement → stuck
+RETURN_TO_CENTER_AFTER_IDLE = 120  # frames with no target (~6s)
+CENTER_RETURN_SPEED = 30   # Speed when returning to center
 
 # --- CALIBRATION ---
-MIN_MOVE_DIST = 5           # Minimum pixels moved to trigger calibration update
-LEARNING_RATE = 0.1         # How fast we correct the angle (0.1 = smooth, 0.5 = twitchy)
+CALIB_MIN_MOVE_DIST = 5
+CALIB_MAX_ERR_TO_UPDATE = 70  # for runtime refinement
+DEFAULT_PX_PER_SPEED_PER_SEC = 3.0  # fallback
 
 # --- COLORS ---
-COL_CAT = (0, 0, 255)       
-COL_WINNER = (0, 255, 0)    
-COL_PREDICTION = (255, 0, 0)
+COL_WINNER = (0, 255, 0)
 COL_TEXT = (255, 255, 255)
 COL_SAFETY = (0, 0, 255)
+COL_PRED_HEAD = (255, 0, 0)
+COL_CMD_HEAD = (255, 0, 255)
 
 # --- DETECTION ---
 MIN_CONFIDENCE = 0.25
 BRIGHTNESS_THRESHOLD = 190
-HOUGH_PARAM2 = 25
 MIN_RADIUS = 8
 MAX_RADIUS = 60
 SEARCH_WINDOW = 100
 PRIOR_WEIGHT = 0.8
 RESET_THRESHOLD = 160
 
-# --- TESTING MODE ---
-# ┌─────────────────────────────────────────────────────────────┐
-# │ SWITCH BETWEEN TESTING AND PRODUCTION MODE:                │
-# │ TESTING_MODE = True  → Hunts PERSON (orange overlay)       │
-# │ TESTING_MODE = False → Hunts CAT (red overlay)             │
-# └─────────────────────────────────────────────────────────────┘
-TESTING_MODE = True  # ← CHANGE THIS TO SWITCH MODES
-TARGET_CLASSES = [0] if TESTING_MODE else [15, 16]  # 0=person, 15=cat, 16=dog
-TARGET_NAME = "PERSON" if TESTING_MODE else "CAT"
+# --- TARGET PRIORITY ---
+PERSON_CLASS = 0
+CAT_CLASS = 15
+DOG_CLASS = 16
+PRIMARY_TARGET_CLASSES = [CAT_CLASS, DOG_CLASS]
+SECONDARY_TARGET_CLASSES = [PERSON_CLASS]
 
 # ================= MATH HELPERS =================
 
-def normalize_angle(a):
+def normalize_angle(a: float) -> float:
     return a % 360
 
-def angle_diff(a, b):
-    """ Returns minimal difference between two angles (-180 to 180) """
+def angle_diff(a: float, b: float) -> float:
+    """Minimal signed difference between angles a and b in (-180, 180]."""
     return (a - b + 180) % 360 - 180
 
-def get_screen_angle(p1, p2):
-    """ 
-    Calculates angle from p1 to p2 on screen.
-    0=Up, 90=Right
+def get_screen_angle(p1, p2) -> float:
+    """
+    Angle from p1 to p2 in screen coordinates.
+    0° = up, 90° = right (accounting for inverted screen Y).
     """
     dx = p2[0] - p1[0]
-    dy = p1[1] - p2[1] # Invert Y (Screen Y is down)
+    dy = p1[1] - p2[1]  # invert Y (screen y grows downwards)
     deg = math.degrees(math.atan2(dx, dy))
     return normalize_angle(deg)
 
-# ================= STABILIZATION =================
+def is_near_boundary(x, y, w, h, margin=BORDER_MARGIN):
+    return (
+        x < margin or x > w - margin or
+        y < margin or y > h - margin
+    )
+
+def will_exit_bounds(x, y, vx, vy, w, h,
+                     horizon_sec=PREDICT_HORIZON_SEC,
+                     margin=BORDER_MARGIN):
+    """
+    Predict if, under current velocity, we will cross the boundary band
+    within 'horizon_sec' seconds.
+    """
+    future_x = x + vx * horizon_sec
+    future_y = y + vy * horizon_sec
+    future_x = float(np.clip(future_x, 0, w-1))
+    future_y = float(np.clip(future_y, 0, h-1))
+
+    near_now = is_near_boundary(x, y, w, h, margin)
+    near_future = is_near_boundary(future_x, future_y, w, h, margin)
+
+    return near_future, (future_x, future_y), near_now
+
+# ================= KALMAN TRACKER =================
 
 class Tracker:
-    def __init__(self):
+    """Simple constant-velocity Kalman filter in image space."""
+    def __init__(self, process_noise=0.01, measurement_noise=1.0):
         self.kf = cv2.KalmanFilter(4, 2)
-        self.kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-        self.kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.01
-        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 1.0
+        self.kf.measurementMatrix = np.array(
+            [[1, 0, 0, 0],
+             [0, 1, 0, 0]], np.float32
+        )
+        self.kf.transitionMatrix = np.array(
+            [[1, 0, 1, 0],
+             [0, 1, 0, 1],
+             [0, 0, 1, 0],
+             [0, 0, 0, 1]], np.float32
+        )
+        self.kf.processNoiseCov = np.eye(4, dtype=np.float32) * process_noise
+        self.kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * measurement_noise
         self.prediction = np.zeros((4, 1), np.float32)
         self.frames_lost = 100
         self.radius = 20
+        self.debug_frame_count = 0
 
     def predict(self):
         self.prediction = self.kf.predict()
         self.frames_lost += 1
         return int(self.prediction[0, 0]), int(self.prediction[1, 0])
 
-    def update(self, x, y, r):
+    def update(self, x, y, r=0):
         meas = np.array([[np.float32(x)], [np.float32(y)]])
         self.prediction = self.kf.correct(meas)
         self.radius = r
         self.frames_lost = 0
 
     def reset(self, x, y):
-        self.kf.statePost = np.array([[np.float32(x)], [np.float32(y)], [0], [0]], np.float32)
+        self.kf.statePost = np.array(
+            [[np.float32(x)], [np.float32(y)], [0], [0]], np.float32
+        )
         self.kf.errorCovPost = np.eye(4, dtype=np.float32) * 1.0
         self.prediction = self.kf.statePost
         self.frames_lost = 0
-        
-    def get_state(self):
-        return int(self.prediction[0, 0]), int(self.prediction[1, 0])
 
-# ================= VISION SYSTEM =================
+    def get_state(self, w=640, h=480):
+        x = int(np.clip(self.prediction[0, 0], 0, w))
+        y = int(np.clip(self.prediction[1, 0], 0, h))
+        return x, y
+
+    def get_velocity(self):
+        vx = float(self.prediction[2, 0])
+        vy = float(self.prediction[3, 0])
+        return vx, vy
+
+    def is_off_screen(self, w=640, h=480, margin=50):
+        x = self.prediction[0, 0]
+        y = self.prediction[1, 0]
+        return (x < -margin or x > w + margin or
+                y < -margin or y > h + margin)
+
+# ================= BALL (SPHERO) DETECTION =================
 
 def find_candidates(frame, model, bright_mask):
     h, w = frame.shape[:2]
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-    # Edge margin to reject wall corners
     EDGE_MARGIN = 30
-    OVERLAP_DIST = 40  # Distance to consider two detections as "same object"
+    OVERLAP_DIST = 40
 
     hough_detections = []
     yolo_detections = []
     blob_detections = []
 
-    # 1. HOUGH CIRCLES (Geometric detection)
-    circles = cv2.HoughCircles(gray, cv2.HOUGH_GRADIENT, dp=1.5, minDist=60,
-                               param1=150, param2=30,
-                               minRadius=MIN_RADIUS, maxRadius=MAX_RADIUS)
+    # Hough circles
+    circles = cv2.HoughCircles(
+        gray, cv2.HOUGH_GRADIENT, dp=1.5, minDist=60,
+        param1=150, param2=30,
+        minRadius=MIN_RADIUS, maxRadius=MAX_RADIUS
+    )
     if circles is not None:
         circles = np.uint16(np.around(circles))
         for i in circles[0, :]:
             cx, cy, r = int(i[0]), int(i[1]), int(i[2])
-
-            # Skip if near edges (likely wall corners)
             if (cx < EDGE_MARGIN or cx > w - EDGE_MARGIN or
                 cy < EDGE_MARGIN or cy > h - EDGE_MARGIN):
                 continue
-
-            # Check brightness
             mask_roi = np.zeros_like(gray)
             cv2.circle(mask_roi, (cx, cy), r, 255, -1)
             mean_brightness = cv2.mean(gray, mask=mask_roi)[0]
-
-            # Must be bright
             if mean_brightness < BRIGHTNESS_THRESHOLD:
                 continue
+            hough_detections.append(
+                {'x': cx, 'y': cy, 'r': r, 'brightness': mean_brightness}
+            )
 
-            hough_detections.append({'x': cx, 'y': cy, 'r': r, 'brightness': mean_brightness})
-
-    # 2. YOLO BALL DETECTION (Semantic detection)
+    # YOLO ball detections (class 32)
     results = model(frame, verbose=False, conf=MIN_CONFIDENCE)
     if results[0].boxes:
         for box in results[0].boxes:
-            if int(box.cls[0]) == 32:  # Ball class
+            if int(box.cls[0]) == 32:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                cx, cy = (x1+x2)//2, (y1+y2)//2
-                r = max((x2-x1)//2, (y2-y1)//2)
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                r = max((x2 - x1) // 2, (y2 - y1) // 2)
                 conf = float(box.conf[0])
-
-                # Skip if near edges
                 if (cx < EDGE_MARGIN or cx > w - EDGE_MARGIN or
                     cy < EDGE_MARGIN or cy > h - EDGE_MARGIN):
                     continue
+                yolo_detections.append(
+                    {'x': cx, 'y': cy, 'r': r, 'conf': conf}
+                )
 
-                yolo_detections.append({'x': cx, 'y': cy, 'r': r, 'conf': conf})
-
-    # 3. BRIGHT BLOBS (Brightness-based detection)
-    contours, _ = cv2.findContours(bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Bright blobs
+    contours, _ = cv2.findContours(
+        bright_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
     for c in contours:
         area = cv2.contourArea(c)
-        if area < 50: continue
+        if area < 50:
+            continue
         perimeter = cv2.arcLength(c, True)
-        if perimeter == 0: continue
-        circularity = 4 * math.pi * area / (perimeter**2)
-
+        if perimeter == 0:
+            continue
+        circularity = 4 * math.pi * area / (perimeter ** 2)
         if circularity > 0.6:
-            ((x, y), r) = cv2.minEnclosingCircle(c)
+            (x, y), r = cv2.minEnclosingCircle(c)
             cx, cy = int(x), int(y)
-
-            # Skip if near edges
             if (cx < EDGE_MARGIN or cx > w - EDGE_MARGIN or
                 cy < EDGE_MARGIN or cy > h - EDGE_MARGIN):
                 continue
-
             if MIN_RADIUS < r < MAX_RADIUS:
-                blob_detections.append({'x': cx, 'y': cy, 'r': int(r), 'circ': circularity})
+                blob_detections.append(
+                    {'x': cx, 'y': cy, 'r': int(r), 'circ': circularity}
+                )
 
-    # 4. CROSS-REFERENCE AND SCORE
-    # The best candidate is one confirmed by multiple methods
     candidates = []
 
     def distance(p1, p2):
         return math.sqrt((p1['x'] - p2['x'])**2 + (p1['y'] - p2['y'])**2)
 
-    # Check each Hough detection
-    for h in hough_detections:
-        score = 100  # Base score for Hough
+    # Fuse Hough + YOLO + blob
+    for h_det in hough_detections:
+        score = 100
         src = 'Hough'
-
-        # Brightness bonus
-        score += (h['brightness'] - BRIGHTNESS_THRESHOLD) / 2
-
-        # Check if YOLO confirms this
+        score += (h_det['brightness'] - BRIGHTNESS_THRESHOLD) / 2
         yolo_match = None
-        for y in yolo_detections:
-            if distance(h, y) < OVERLAP_DIST:
-                yolo_match = y
+        for y_det in yolo_detections:
+            if distance(h_det, y_det) < OVERLAP_DIST:
+                yolo_match = y_det
                 break
-
-        # Check if Blob confirms this
         blob_match = None
-        for b in blob_detections:
-            if distance(h, b) < OVERLAP_DIST:
-                blob_match = b
+        for b_det in blob_detections:
+            if distance(h_det, b_det) < OVERLAP_DIST:
+                blob_match = b_det
                 break
-
-        # Multi-method confirmation bonuses
         if yolo_match and blob_match:
-            score += 200  # Triple confirmation!
+            score += 200
             src = 'Hough+YOLO+Blob'
         elif yolo_match:
-            score += 150  # Hough + YOLO
+            score += 150
             src = 'Hough+YOLO'
         elif blob_match:
-            score += 50   # Hough + Blob
+            score += 50
             src = 'Hough+Blob'
+        candidates.append({
+            'x': h_det['x'],
+            'y': h_det['y'],
+            'r': h_det['r'],
+            'score': score,
+            'src': src
+        })
 
-        candidates.append({'x': h['x'], 'y': h['y'], 'r': h['r'], 'score': score, 'src': src})
-
-    # Also check YOLO detections that weren't matched to Hough
-    for y in yolo_detections:
-        # Skip if already matched
-        if any(distance(h, y) < OVERLAP_DIST for h in hough_detections):
+    for y_det in yolo_detections:
+        if any(distance(h_det, y_det) < OVERLAP_DIST for h_det in hough_detections):
             continue
-
-        score = 120  # YOLO alone is decent
+        score = 120
         src = 'YOLO'
-
-        # Check blob match
         blob_match = None
-        for b in blob_detections:
-            if distance(y, b) < OVERLAP_DIST:
-                blob_match = b
+        for b_det in blob_detections:
+            if distance(y_det, b_det) < OVERLAP_DIST:
+                blob_match = b_det
                 break
-
         if blob_match:
             score += 60
             src = 'YOLO+Blob'
-
-        candidates.append({'x': y['x'], 'y': y['y'], 'r': y['r'], 'score': score, 'src': src})
+        candidates.append({
+            'x': y_det['x'],
+            'y': y_det['y'],
+            'r': y_det['r'],
+            'score': score,
+            'src': src
+        })
 
     return candidates
 
-def select_best_ball(candidates, tracker):
-    if not candidates: return None
+def select_best_ball(candidates, tracker: Tracker):
+    if not candidates:
+        return None
     pred_x, pred_y = tracker.get_state()
     best_candidate = None
-    highest_adjusted_score = -9999
-    
+    highest_adjusted_score = -1e9
     for c in candidates:
         dist = math.sqrt((c['x'] - pred_x)**2 + (c['y'] - pred_y)**2)
         if tracker.frames_lost < 30:
@@ -974,7 +322,8 @@ def select_best_ball(candidates, tracker):
                 c['final_score'] = c['score'] + spatial_bonus
             else:
                 c['final_score'] = c['score'] - (dist * PRIOR_WEIGHT)
-                if c['score'] > RESET_THRESHOLD: c['final_score'] = c['score'] 
+                if c['score'] > RESET_THRESHOLD:
+                    c['final_score'] = c['score']
         else:
             c['final_score'] = c['score']
         if c['final_score'] > highest_adjusted_score:
@@ -982,501 +331,680 @@ def select_best_ball(candidates, tracker):
             best_candidate = c
     return best_candidate
 
-def process_vision(frame, model, ball_tracker, cat_tracker):
+# ================= VISION (BALL + TARGET) =================
+
+def process_vision(frame, model, ball_tracker: Tracker, target_tracker: Tracker):
     h, w = frame.shape[:2]
-    bright_mask = cv2.threshold(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    _, bright_mask = cv2.threshold(
+        gray, BRIGHTNESS_THRESHOLD, 255, cv2.THRESH_BINARY
+    )
     bright_mask = cv2.dilate(bright_mask, None, iterations=2)
 
-    # Ball
+    # --- ball (Sphero LED) ---
     candidates = find_candidates(frame, model, bright_mask)
     best_ball = select_best_ball(candidates, ball_tracker)
-    bx, by = ball_tracker.predict()
+    bx_pred, by_pred = ball_tracker.predict()
 
     if best_ball:
-        dist = math.sqrt((best_ball['x'] - bx)**2 + (best_ball['y'] - by)**2)
+        dist = math.sqrt((best_ball['x'] - bx_pred)**2 + (best_ball['y'] - by_pred)**2)
         if dist > SEARCH_WINDOW and best_ball['score'] > RESET_THRESHOLD:
             ball_tracker.reset(best_ball['x'], best_ball['y'])
         else:
             ball_tracker.update(best_ball['x'], best_ball['y'], best_ball['r'])
 
-    # Target Detection (Person for testing, Cat for production)
-    # TESTING_MODE controls which target to track
+    # --- target detection (cat/dog/person via segmentation) ---
     results = model(frame, verbose=False, conf=MIN_CONFIDENCE)
-    cat_mask = np.zeros((h, w), dtype=np.uint8)  # Still named cat_mask for compatibility
-    if results[0].masks:
+    primary_mask = np.zeros((h, w), dtype=np.uint8)
+    secondary_mask = np.zeros((h, w), dtype=np.uint8)
+
+    debug_detections = []
+    primary_found_count = 0
+    secondary_found_count = 0
+    chosen_target = None
+
+    if results[0].boxes:
+        has_masks = results[0].masks is not None
         for i, box in enumerate(results[0].boxes):
-            # Use TARGET_CLASSES from config
-            if int(box.cls[0]) in TARGET_CLASSES:
-                m = cv2.resize(results[0].masks.data[i].cpu().numpy(), (w, h))
-                cat_mask = cv2.bitwise_or(cat_mask, (m > 0.5).astype(np.uint8) * 255)
+            cls_id = int(box.cls[0])
+            conf = float(box.conf[0])
+            debug_detections.append((cls_id, conf))
+            if not has_masks or i >= len(results[0].masks.data):
+                continue
+            m = cv2.resize(results[0].masks.data[i].cpu().numpy(), (w, h))
+            binary_m = (m > 0.5).astype(np.uint8) * 255
+            if cls_id in PRIMARY_TARGET_CLASSES:
+                primary_found_count += 1
+                primary_mask = cv2.bitwise_or(primary_mask, binary_m)
+            elif cls_id in SECONDARY_TARGET_CLASSES:
+                secondary_found_count += 1
+                secondary_mask = cv2.bitwise_or(secondary_mask, binary_m)
 
-    M = cv2.moments(cat_mask)
-    if M["m00"] > 0:
-        cat_tracker.update(int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"]), 0)
+    if primary_found_count > 0:
+        target_mask = primary_mask
+        chosen_target = "CAT/DOG"
+        target_color = (0, 0, 255)
+    elif secondary_found_count > 0:
+        target_mask = secondary_mask
+        chosen_target = "PERSON"
+        target_color = (255, 165, 0)
     else:
-        cat_tracker.predict()
+        target_mask = np.zeros((h, w), dtype=np.uint8)
+        chosen_target = None
+        target_color = (128, 128, 128)
 
-    return best_ball, cat_mask, candidates
+    # Only track targets if target_tracker is provided
+    if target_tracker is not None:
+        target_tracker.debug_frame_count += 1
+        if target_tracker.debug_frame_count % 60 == 0:
+            if debug_detections:
+                print(f"[TARGET DEBUG] first 5: {debug_detections[:5]}")
+                print(f"[TARGET DEBUG] Cat/Dog: {primary_found_count}, Person: {secondary_found_count}")
+                print(f"[TARGET DEBUG] chosen: {chosen_target}, has_masks: {results[0].masks is not None}")
+            else:
+                print("[TARGET DEBUG] no detections")
 
-# ================= MAIN LOOP =================
+        M = cv2.moments(target_mask)
+        if M["m00"] > 0:
+            tx = int(M["m10"] / M["m00"])
+            ty = int(M["m01"] / M["m00"])
+            target_tracker.update(tx, ty, 0)
+            if target_tracker.debug_frame_count % 60 == 0:
+                print(f"[TARGET DEBUG] center=({tx},{ty}), area={int(M['m00'])}")
+        else:
+            target_tracker.predict()
+            if target_tracker.debug_frame_count % 60 == 0 and chosen_target:
+                print("[TARGET DEBUG] mask detected but no moments?")
+
+    return best_ball, target_mask, candidates, chosen_target, target_color
+
+# ================= CALIBRATION =================
+
+def calibrate_orientation_and_scale(cap, droid, model, ball_tracker):
+    """
+    After manual alignment, do a short auto-calibration:
+      - Move Sphero in 4 cardinal directions (0, 90, 180, 270)
+      - Use robust ball detection via process_vision()
+      - Infer:
+          calibration_offset  (difference between Sphero 0° and camera frame)
+          px_per_speed_per_sec (pixels per unit Sphero speed per second)
+    """
+    print("\n=== AUTO CALIBRATION (heading + scale) ===")
+    calib_window_open = False
+
+    # Make sure ball is visible
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        best_ball, target_mask, candidates, chosen_target, target_color = process_vision(
+            frame, model, ball_tracker, None
+        )
+        bx, by = ball_tracker.get_state(frame.shape[1], frame.shape[0])
+        ball_found = ball_tracker.frames_lost < 10
+        if ball_found:
+            print(f"[CALIB] Ball found at ({bx},{by})")
+            break
+        cv2.putText(frame, "Place Sphero in view for calibration",
+                    (30, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        calib_window_open = True
+        cv2.imshow("Calibration", frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    if calib_window_open:
+        cv2.destroyWindow("Calibration")
+
+    test_dirs = [0, 90, 180, 270]
+    CALIB_SPEED = 40
+    MOVE_TIME = 0.6
+    SETTLE_TIME = 0.4
+
+    offsets = []
+    scales = []
+
+    for d in test_dirs:
+        print(f"[CALIB] Testing command heading {d}°")
+        # let detection settle
+        for _ in range(5):
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            process_vision(frame, model, ball_tracker, None)
+            time.sleep(LOOP_DELAY)
+
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        h, w = frame.shape[:2]
+        process_vision(frame, model, ball_tracker, None)
+        sx, sy = ball_tracker.get_state(w, h)
+        ball_found = ball_tracker.frames_lost < 10
+        if not ball_found:
+            print("[CALIB] Ball lost before move, skipping sample.")
+            continue
+        start = (sx, sy)
+
+        # Move Sphero
+        droid.set_heading(int(d))
+        droid.set_speed(CALIB_SPEED)
+        t0 = time.time()
+        while time.time() - t0 < MOVE_TIME:
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            process_vision(frame, model, ball_tracker, None)
+            time.sleep(LOOP_DELAY)
+
+        droid.set_speed(0)
+        time.sleep(SETTLE_TIME)
+
+        # Measure end position
+        for _ in range(3):
+            ret, frame = cap.read()
+            if not ret:
+                continue
+            process_vision(frame, model, ball_tracker, None)
+            time.sleep(LOOP_DELAY)
+
+        ret, frame = cap.read()
+        if not ret:
+            continue
+        h, w = frame.shape[:2]
+        process_vision(frame, model, ball_tracker, None)
+        ex, ey = ball_tracker.get_state(w, h)
+        ball_found = ball_tracker.frames_lost < 10
+        if not ball_found:
+            print("[CALIB] Ball lost after move, skipping sample.")
+            continue
+        end = (ex, ey)
+
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist < CALIB_MIN_MOVE_DIST:
+            print(f"[CALIB] Movement too small ({dist:.1f}px), skipping.")
+            continue
+
+        actual_angle = get_screen_angle(start, end)
+        off = angle_diff(actual_angle, d)
+        offsets.append(off)
+
+        scale = dist / (CALIB_SPEED * MOVE_TIME)
+        scales.append(scale)
+
+        print(f"[CALIB] cmd:{d}°, actual:{actual_angle:.1f}°,"
+              f" offset:{off:.1f}°, dist:{dist:.1f}px, scale sample:{scale:.2f}")
+
+    if not offsets:
+        print("[CALIB] No valid samples. Using offset=0°, default scale.")
+        calibration_offset = 0.0
+        px_per_speed_per_sec = DEFAULT_PX_PER_SPEED_PER_SEC
+    else:
+        rad = np.deg2rad(offsets)
+        mean_sin = np.mean(np.sin(rad))
+        mean_cos = np.mean(np.cos(rad))
+        calibration_offset = normalize_angle(np.rad2deg(math.atan2(mean_sin, mean_cos)))
+        px_per_speed_per_sec = float(np.mean(scales))
+        print(f"[CALIB] Final orientation offset: {calibration_offset:.1f}°")
+        print(f"[CALIB] Final scale: {px_per_speed_per_sec:.2f} px/(speed·s)")
+
+    print("=== AUTO CALIBRATION DONE ===\n")
+    return calibration_offset, px_per_speed_per_sec
+
+# ================= MAIN =================
 
 def main():
     print("Scanning for Sphero...")
     toy = None
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(scanner.find_toy)
-        try: toy = future.result(timeout=10)
-        except: pass
-    if not toy: print("No Sphero found."); return
+        try:
+            toy = future.result(timeout=10)
+        except Exception as e:
+            print(f"[ERROR] Scanner exception: {type(e).__name__}: {e}")
+            toy = None
 
-    print("Loading AI...")
-    model = YOLO("yolov8s-seg.pt") 
-    ball_tracker = Tracker()
-    cat_tracker = Tracker()
+    if not toy:
+        print("No Sphero found.")
+        return
+
+    print("Loading YOLO model...")
+    model = YOLO("yolov8s-seg.pt")
+
+    ball_tracker = Tracker(process_noise=0.01, measurement_noise=1.0)
+    target_tracker = Tracker(process_noise=0.15, measurement_noise=2.0)
 
     with SpheroEduAPI(toy) as droid:
-        droid.set_main_led(Color(255, 255, 255))
+        print("[SPHERO] Initializing...")
         droid.set_speed(0)
+        time.sleep(0.2)
+        droid.set_main_led(Color(255, 255, 255))
+        time.sleep(0.2)
 
+        # Camera
         cap = cv2.VideoCapture(CAM_INDEX, cv2.CAP_DSHOW)
-        if not cap.isOpened(): cap = cv2.VideoCapture(CAM_INDEX)
-        
-        # STATE
-        calibration_offset = 0.0
+        if not cap.isOpened():
+            print(f"[CAMERA] DSHOW failed, trying default...")
+            cap = cv2.VideoCapture(CAM_INDEX)
+        if not cap.isOpened():
+            print("[CAMERA] could not open")
+            return
+
+        ret, test_frame = cap.read()
+        if not ret or test_frame is None:
+            print("[CAMERA] cannot read first frame")
+            return
+
+        h0, w0 = test_frame.shape[:2]
+        print(f"[CAMERA] opened {CAM_INDEX}, resolution: {w0}x{h0}")
+
+        # Reset heading
+        print("[SPHERO] reset heading (0°)...")
+        droid.reset_aim()
+        time.sleep(1.0)
+
+        # --- Manual alignment with LED arrow and overlay ---
+        print("\n" + "="*60)
+        print("[ALIGNMENT] Sphero will display UP ARROW on LED matrix.")
+        print("[ALIGNMENT] Rotate Sphero so arrow points toward GREEN ARROW on screen (up).")
+        print("[ALIGNMENT] Press SPACE or ENTER when aligned.")
+        print("="*60 + "\n")
+
+        arrow_pattern = [
+            [0, 0, 0, 1, 1, 0, 0, 0],
+            [0, 0, 1, 1, 1, 1, 0, 0],
+            [0, 1, 1, 1, 1, 1, 1, 0],
+            [1, 1, 0, 1, 1, 0, 1, 1],
+            [0, 0, 0, 1, 1, 0, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0, 0],
+            [0, 0, 0, 1, 1, 0, 0, 0],
+        ]
+
+        try:
+            try:
+                droid.set_matrix_character("^")
+            except Exception:
+                try:
+                    for y in range(8):
+                        for x in range(8):
+                            if arrow_pattern[y][x] == 1:
+                                droid.set_matrix_pixel(x, y, Color(0, 0, 255))
+                            else:
+                                droid.set_matrix_pixel(x, y, Color(0, 0, 0))
+                except Exception:
+                    droid.set_matrix(arrow_pattern)
+        except Exception:
+            print("[ALIGNMENT] no LED matrix, falling back to blue LED")
+            droid.set_main_led(Color(0, 0, 255))
+
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            h, w = frame.shape[:2]
+            disp = frame.copy()
+
+            arrow_tip = (w // 2, 30)
+            arrow_base = (w // 2, 100)
+            arrow_width = 40
+            cv2.line(disp, arrow_base, arrow_tip, (0, 255, 0), 8)
+            pts = np.array([
+                [arrow_tip[0], arrow_tip[1]],
+                [arrow_tip[0] - arrow_width, arrow_tip[1] + arrow_width],
+                [arrow_tip[0] + arrow_width, arrow_tip[1] + arrow_width]
+            ], np.int32)
+            cv2.fillPoly(disp, [pts], (0, 255, 0))
+            cv2.putText(disp, "ALIGN SPHERO ARROW WITH GREEN ARROW",
+                        (w//2 - 280, 140), cv2.FONT_HERSHEY_SIMPLEX, 0.8,
+                        (0, 255, 0), 2)
+            cv2.putText(disp, "Press SPACE or ENTER when ready",
+                        (w//2 - 220, h - 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7,
+                        (255, 255, 255), 2)
+            cv2.imshow("Sphero Alignment", disp)
+            key = cv2.waitKey(30)
+            if key in (32, 13):  # space or enter
+                break
+
+        cv2.destroyWindow("Sphero Alignment")
+        # Clear matrix, set back to white
+        try:
+            clear_matrix = [[0]*8 for _ in range(8)]
+            droid.set_matrix(clear_matrix)
+        except Exception:
+            pass
+        droid.set_main_led(Color(255, 255, 255))
+        time.sleep(0.5)
+
+        print("[ALIGNMENT] done.")
+
+        # ---- AUTO CALIBRATION (square pattern: 0, 90, 180, 270) ----
+        calibration_offset, px_per_speed_per_sec = calibrate_orientation_and_scale(
+            cap, droid, model, ball_tracker
+        )
+
+        print("[SPHERO] Ready for tracking.")
+
+        # Control state
+        est_x = w // 2
+        est_y = h // 2
+        est_vx = 0.0
+        est_vy = 0.0
+
         last_pos = None
+        last_meas_time = None
         last_command_heading = 0
-        is_moving = False
+        last_speed = 0
+        stuck_frames = 0
+        idle_frames = 0
 
-        # CALIBRATION STATE
-        calib_state = "INITIAL"  # INITIAL, TEST_MOVE, OPERATIONAL, RECOVERY
-        calib_test_phase = 0  # Which test we're on
-        calib_start_pos = None
-        calib_wait_frames = 0
-        calib_samples = []
+        # Latency estimation
+        latency_est = LATENCY_INIT
+        pending_latency_event = None  # dict with keys: time, x, y
+        last_speed_for_latency = 0.0
 
-        # RECOVERY STATE
-        ball_lost_frames = 0
-        last_command_before_lost = None
-        recovery_heading = None
+        print("--- LATENCY-COMPENSATED VISUAL TRACKER ---")
+        print("Target priority: CAT/DOG > PERSON. Default: center.")
 
-        print("--- CONTINUOUS ADAPTIVE TRACKER ---")
-        print(f"MODE: {'TESTING (Hunting PERSON)' if TESTING_MODE else 'PRODUCTION (Hunting CAT)'}")
-        print("Starting INITIAL CALIBRATION phase...")
-        
         try:
             while True:
                 loop_start = time.time()
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret:
+                    break
                 h, w = frame.shape[:2]
-                
-                # 1. VISION
-                best_ball, cat_mask, candidates = process_vision(frame, model, ball_tracker, cat_tracker)
-                bx, by = ball_tracker.get_state()
-                cx, cy = cat_tracker.get_state()
+
+                best_ball, target_mask, candidates, chosen_target, target_color = process_vision(
+                    frame, model, ball_tracker, target_tracker
+                )
+                bx, by = ball_tracker.get_state(w, h)
+                vx, vy = ball_tracker.get_velocity()
+
+                tx, ty = target_tracker.get_state(w, h)
+                tvx, tvy = target_tracker.get_velocity()
+
                 ball_found = ball_tracker.frames_lost < 20
-                cat_found = cat_tracker.frames_lost < 30
+                target_found = target_tracker.frames_lost < 30 and chosen_target is not None
 
-                # 2. VISUALIZATION
+                # --- Update state estimation with velocity tracking ---
+                now = time.time()
+                if ball_found:
+                    # measurement velocities
+                    if last_meas_time is not None and last_pos is not None:
+                        dt = now - last_meas_time
+                        if dt > 1e-3:
+                            meas_vx = (bx - last_pos[0]) / dt
+                            meas_vy = (by - last_pos[1]) / dt
+                        else:
+                            meas_vx, meas_vy = est_vx, est_vy
+                    else:
+                        meas_vx, meas_vy = 0.0, 0.0
+
+                    last_pos = (bx, by)
+                    last_meas_time = now
+
+                    # SMALL prediction horizon based on latency_est (clamped)
+                    horizon = min(latency_est, LATENCY_MAX_FOR_PRED)
+                    pred_x = bx + meas_vx * horizon
+                    pred_y = by + meas_vy * horizon
+
+                    # smooth measurement + tiny prediction
+                    ALPHA = 0.5
+                    est_x = (1-ALPHA) * est_x + ALPHA * pred_x
+                    est_y = (1-ALPHA) * est_y + ALPHA * pred_y
+
+                    est_vx, est_vy = meas_vx, meas_vy
+                else:
+                    # Dead-reckon using command-based model if no measurement
+                    if last_meas_time is not None:
+                        dt = now - last_meas_time
+                        v_cmd = px_per_speed_per_sec * last_speed
+                        heading_world = normalize_angle(
+                            (last_command_heading or 0.0) + calibration_offset
+                        )
+                        rad = math.radians(heading_world)
+                        est_x += v_cmd * dt * math.sin(rad)
+                        est_y += v_cmd * dt * -math.cos(rad)
+                        last_meas_time = now
+
+                est_x = float(np.clip(est_x, 0, w-1))
+                est_y = float(np.clip(est_y, 0, h-1))
+
+                # --- Latency estimation from command → movement ---
+                if pending_latency_event is not None and ball_found:
+                    ex, ey = pending_latency_event["x"], pending_latency_event["y"]
+                    dmove = math.sqrt((bx - ex)**2 + (by - ey)**2)
+                    if dmove > LATENCY_MOVE_THRESH_PX:
+                        sample = now - pending_latency_event["time"]
+                        latency_est = (1 - LATENCY_BETA) * latency_est + LATENCY_BETA * sample
+                        pending_latency_event = None
+
+                # --- Target prediction for chasing ---
+                tx_pred = int(tx + tvx * min(latency_est, LATENCY_MAX_FOR_PRED))
+                ty_pred = int(ty + tvy * min(latency_est, LATENCY_MAX_FOR_PRED))
+                tx_pred = int(np.clip(tx_pred, 0, w-1))
+                ty_pred = int(np.clip(ty_pred, 0, h-1))
+
                 vis = frame.copy()
+                # overlay target mask
                 overlay = np.zeros_like(vis)
-                # Different color for testing vs production
-                target_color = (255, 165, 0) if TESTING_MODE else COL_CAT  # Orange for person, Red for cat
-                overlay[cat_mask == 255] = target_color
-                vis = cv2.addWeighted(vis, 1.0, overlay, 0.5, 0)
+                overlay[target_mask == 255] = target_color
+                vis = cv2.addWeighted(vis, 1.0, overlay, 0.4, 0)
 
-                # Draw all candidates (gray circles with scores)
+                # draw candidates
                 for cand in candidates:
-                    color = (100, 100, 100)  # Gray for rejected
-                    if cand.get('final_score'):
-                        cv2.circle(vis, (cand['x'], cand['y']), cand['r'], color, 1)
-                        cv2.putText(vis, f"{int(cand['final_score'])}", (cand['x']+5, cand['y']-5),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+                    if 'final_score' in cand:
+                        cv2.circle(vis, (cand['x'], cand['y']), cand['r'], (100, 100, 100), 1)
+                        cv2.putText(vis, f"{int(cand['final_score'])}",
+                                    (cand['x']+5, cand['y']-5),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1)
 
-                # Draw selected ball (bright green)
                 if best_ball:
-                    cv2.circle(vis, (best_ball['x'], best_ball['y']), best_ball['r'], COL_WINNER, 3)
-                    cv2.putText(vis, f"{best_ball['src']}", (best_ball['x']+best_ball['r']+5, best_ball['y']),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_WINNER, 2)
+                    cv2.circle(vis, (best_ball['x'], best_ball['y']), best_ball['r'], COL_WINNER, 2)
+                    cv2.putText(vis, best_ball['src'],
+                                (best_ball['x']+best_ball['r']+5, best_ball['y']),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, COL_WINNER, 1)
 
-                # Draw tracker prediction (blue cross)
+                # draw ball measurement and state estimate
                 cv2.drawMarker(vis, (bx, by), (255, 0, 0), cv2.MARKER_CROSS, 15, 2)
+                cv2.circle(vis, (int(est_x), int(est_y)), 6, (0, 255, 255), 2)
+                cv2.putText(vis, "EST", (int(est_x)+8, int(est_y)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
 
-                # Draw recovery arrow if in recovery mode
-                if ball_lost_frames > 10 and recovery_heading is not None:
-                    # Draw a large orange arrow showing recovery direction
-                    rec_rad = math.radians(recovery_heading)
-                    rec_x = int(w//2 + 80 * math.sin(rec_rad))
-                    rec_y = int(h//2 - 80 * math.cos(rec_rad))
-                    cv2.arrowedLine(vis, (w//2, h//2), (rec_x, rec_y), (0, 165, 255), 4)
+                # center cross (default waypoint)
+                cx0, cy0 = w//2, h//2
+                cv2.circle(vis, (cx0, cy0), 30, (0, 0, 255), 2)
+                cv2.drawMarker(vis, (cx0, cy0), (0, 0, 255), cv2.MARKER_CROSS, 30, 2)
 
-                # 3. LOGIC
-                status = "WAITING..."
-                speed = 0
-                heading = 0
+                status = ""
+                heading_cmd = None
+                speed_cmd = 0
                 should_move = False
-                calib_updated = False
 
-                # ========== CALIBRATION STATE MACHINE ==========
-                if calib_state == "INITIAL":
-                    # Wait for ball detection
-                    if ball_found:
-                        calib_start_pos = (bx, by)
-                        calib_state = "TEST_MOVE"
-                        calib_test_phase = 0
-                        calib_wait_frames = 0
-                        status = "CALIBRATING: Starting test"
-                        print(f"[CALIB] Ball found at ({bx}, {by}). Starting test movements...")
+                # --- Control logic: dist to goal/center ---
+                dist_to_goal = 0.0
+                center_x, center_y = w // 2, h // 2
+                dist_to_center = math.sqrt(
+                    (est_x - center_x)**2 + (est_y - center_y)**2
+                )
+
+                # --- safety: boundaries, predicted exit using commanded model ---
+                v_model = px_per_speed_per_sec * last_speed
+                heading_world = normalize_angle(
+                    (last_command_heading or 0.0) + calibration_offset
+                )
+                rad = math.radians(heading_world)
+                vx_model = v_model * math.sin(rad)
+                vy_model = v_model * -math.cos(rad)
+
+                will_exit, (fx, fy), near_now = will_exit_bounds(
+                    est_x, est_y, vx_model, vy_model, w, h
+                )
+
+                # Safety priority
+                if will_exit or is_near_boundary(est_x, est_y, w, h):
+                    safety_active = True
+                    angle_to_center = get_screen_angle((est_x, est_y), (center_x, center_y))
+                    heading_cmd = normalize_angle(angle_to_center - calibration_offset)
+                    dist_c = dist_to_center
+                    speed_cmd = min(CENTER_RETURN_SPEED,
+                                    max(MIN_SPEED, int(dist_c / 4)))
+                    should_move = dist_c > 30
+                    status = "SAFETY: retreat to center"
+                    cv2.rectangle(vis, (0,0), (w,h), COL_SAFETY, 3)
+
+                elif not ball_found:
+                    status = "BALL LOST"
+                    should_move = False
+                    speed_cmd = 0
+                    idle_frames += 1
+
+                else:
+                    # --- normal control ---
+                    # choose target: target center if found, else center point
+                    if target_found:
+                        idle_frames = 0
+                        goal_x, goal_y = tx_pred, ty_pred
+                        goal_label = chosen_target
                     else:
-                        status = "CALIBRATING: Waiting for ball..."
+                        idle_frames += 1
+                        goal_x, goal_y = center_x, center_y
+                        goal_label = "CENTER"
 
-                elif calib_state == "TEST_MOVE":
-                    # Perform circular calibration movement
-                    TEST_SPEED = 5  # Ultra slow speed for tiny circle
-                    CIRCLE_FRAMES = 40  # Fast rotation at slow speed = very tight circle
-                    SAMPLE_INTERVAL = 5  # Sample every 5 frames
+                    # compute heading from state estimate to target
+                    ang_screen = get_screen_angle((est_x, est_y), (goal_x, goal_y))
+                    heading_cmd = normalize_angle(ang_screen - calibration_offset)
 
-                    calib_wait_frames += 1
+                    dx = goal_x - est_x
+                    dy = goal_y - est_y
+                    dist_to_goal = math.sqrt(dx*dx + dy*dy)
 
-                    # Move in a circle by constantly changing heading
-                    if calib_wait_frames <= CIRCLE_FRAMES:
-                        # Calculate heading for circular motion (360° over CIRCLE_FRAMES)
-                        heading = int((calib_wait_frames * 360.0 / CIRCLE_FRAMES) % 360)
-                        speed = TEST_SPEED
-                        should_move = True
-                        status = f"CALIBRATING: Tiny circle {int(calib_wait_frames/CIRCLE_FRAMES*100)}%"
-
-                        # Sample at intervals while moving
-                        if calib_wait_frames % SAMPLE_INTERVAL == 0 and last_pos and ball_found:
-                            dist_moved = math.sqrt((bx - last_pos[0])**2 + (by - last_pos[1])**2)
-
-                            if dist_moved > 1:  # Ultra low threshold for tiny movements
-                                actual_angle = get_screen_angle(last_pos, (bx, by))
-                                commanded_angle = last_command_heading
-                                measured_offset = angle_diff(actual_angle, commanded_angle)
-                                calib_samples.append(measured_offset)
-                                print(f"[CALIB] Sample {len(calib_samples)}: Cmd={int(commanded_angle)}°, Actual={int(actual_angle)}°, Offset={int(measured_offset)}°, Dist={int(dist_moved)}px")
-
-                    else:
-                        # Circle complete, stop and calculate
+                    # Check if arrived
+                    if dist_to_goal < TARGET_REACHED_PIX:
+                        speed_cmd = 0
                         should_move = False
-                        speed = 0
-
-                        if len(calib_samples) >= 3:  # Need at least 3 samples
-                            calibration_offset = sum(calib_samples) / len(calib_samples)
-                            calibration_offset = normalize_angle(calibration_offset)
-                            print(f"[CALIB] COMPLETE! Final offset: {int(calibration_offset)}° (from {len(calib_samples)} samples)")
-                            calib_state = "OPERATIONAL"
-                            status = "CALIBRATION COMPLETE"
-                        else:
-                            print(f"[CALIB] Not enough samples ({len(calib_samples)}), retrying...")
-                            calib_wait_frames = 0
-                            calib_samples = []
-
-                elif calib_state == "OPERATIONAL":
-                    # Normal operation with prediction-based calibration
-
-                    # Prediction-based calibration refinement
-                    if not is_moving:
-                        pass  # Not moving, no refinement needed
-                    elif not last_pos:
-                        print(f"[REFINE BLOCKED] is_moving=True but no last_pos")
-                    elif not ball_found:
-                        print(f"[REFINE BLOCKED] is_moving=True but ball not found")
-                    else:
-                        # We have all conditions met
-                        dist_moved = math.sqrt((bx - last_pos[0])**2 + (by - last_pos[1])**2)
-
-                        if dist_moved > MIN_MOVE_DIST:
-                            # Where did we actually go?
-                            actual_heading = get_screen_angle(last_pos, (bx, by))
-
-                            # Where did we EXPECT to go? (Command + current offset)
-                            expected_heading = normalize_angle(last_command_heading + calibration_offset)
-
-                            # Calculate expected position (for visualization)
-                            expected_rad = math.radians(expected_heading)
-                            expected_x = int(last_pos[0] + dist_moved * math.sin(expected_rad))
-                            expected_y = int(last_pos[1] - dist_moved * math.cos(expected_rad))
-
-                            # Prediction error
-                            prediction_error = angle_diff(actual_heading, expected_heading)
-                            position_error = math.sqrt((bx - expected_x)**2 + (by - expected_y)**2)
-
-                            # Always print to see what's happening
-                            print(f"[REFINE] Cmd:{int(last_command_heading)}° + Offset:{int(calibration_offset)}° = Expected:{int(expected_heading)}° | Actual:{int(actual_heading)}° | AngleErr:{int(prediction_error)}° PosErr:{int(position_error)}px")
-
-                            # VERY aggressive calibration - even tiny errors trigger correction
-                            if abs(prediction_error) > 0.5:  # 0.5° error triggers correction (was 1°)
-                                old_offset = calibration_offset
-                                # More aggressive learning rate for faster convergence
-                                calibration_offset += 0.4 * prediction_error  # Increased from 0.25 to 0.4 (40% correction)
-                                calibration_offset = normalize_angle(calibration_offset)
-                                calib_updated = True
-                                print(f"[REFINE APPLY] Offset: {int(old_offset)}° → {int(calibration_offset)}° (Δ{int(0.4 * prediction_error)}°)")
-
-                            # Draw calibration vectors
-                            # Draw expected position as a circle
-                            cv2.circle(vis, (expected_x, expected_y), 12, (255, 255, 0), 2)  # Yellow circle
-                            cv2.circle(vis, (expected_x, expected_y), 3, (255, 255, 0), -1)  # Yellow dot
-
-                            # Draw line from expected to actual (error visualization)
-                            cv2.line(vis, (expected_x, expected_y), (bx, by), (255, 0, 255), 2)  # Magenta error line
-
-                            # Expected direction arrow from last pos
-                            exp_rad = math.radians(expected_heading)
-                            exp_x = int(last_pos[0] + 60 * math.sin(exp_rad))
-                            exp_y = int(last_pos[1] - 60 * math.cos(exp_rad))
-                            cv2.arrowedLine(vis, last_pos, (exp_x, exp_y), (255, 255, 0), 2)  # Yellow
-
-                            # Actual direction
-                            cv2.arrowedLine(vis, last_pos, (bx, by), (0, 255, 255), 2)  # Cyan
-
-                            # Draw position error text
-                            mid_x = (expected_x + bx) // 2
-                            mid_y = (expected_y + by) // 2
-                            cv2.putText(vis, f"{int(position_error)}px", (mid_x + 5, mid_y - 5),
-                                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                        else:
-                            print(f"[REFINE SKIP] Movement too small: {int(dist_moved)}px < {MIN_MOVE_DIST}px")
-
-                    if ball_found:
-                        # --- A. SAFETY CHECK (BOUNDS) ---
-                        if (bx < BORDER_MARGIN or bx > w - BORDER_MARGIN or
-                            by < BORDER_MARGIN or by > h - BORDER_MARGIN):
-                            status = "SAFETY STOP (BOUNDS)"
-                            should_move = False
-                            cv2.rectangle(vis, (0,0), (w,h), COL_SAFETY, 5)
-
-                        # --- C. CHASE LOGIC ---
-                        elif cat_found:
-                            vec_ang = get_screen_angle((bx, by), (cx, cy))
-                            dist_px = math.sqrt((bx-cx)**2 + (by-cy)**2)
-
-                            # Visuals
-                            # Draw distance zones around ball
-                            cv2.circle(vis, (bx, by), int(TOUCH_DISTANCE), (255, 0, 0), 1)  # Blue = stop zone
-                            cv2.circle(vis, (bx, by), int(BRAKE_DISTANCE), (0, 255, 255), 1)  # Cyan = brake zone
-
-                            # White line = desired direction (to cat)
-                            cv2.line(vis, (bx, by), (cx, cy), (255, 255, 255), 2)
-
-                            # Predicted "Forward" Arrow (what robot thinks is forward)
-                            pred_ang = normalize_angle(0 + calibration_offset)
-                            rad = math.radians(pred_ang)
-                            end_x = int(bx + 40 * math.sin(rad))
-                            end_y = int(by - 40 * math.cos(rad))
-                            cv2.arrowedLine(vis, (bx, by), (end_x, end_y), COL_PREDICTION, 2)
-
-                            # Draw desired angle arrow (green - where we want to go)
-                            des_rad = math.radians(vec_ang)
-                            des_x = int(bx + 50 * math.sin(des_rad))
-                            des_y = int(by - 50 * math.cos(des_rad))
-                            cv2.arrowedLine(vis, (bx, by), (des_x, des_y), (0, 255, 0), 2)
-
-                            # Calculate safe stopping distance
-                            touch_gap = dist_px - (ball_tracker.radius + 40)
-
-                            # ALWAYS calculate heading toward target (continuous tracking)
-                            heading = normalize_angle(vec_ang - calibration_offset)
-
-                            # Draw command arrow (magenta - what we're actually sending)
-                            cmd_rad = math.radians(heading)
-                            cmd_x = int(bx + 60 * math.sin(cmd_rad))
-                            cmd_y = int(by - 60 * math.cos(cmd_rad))
-                            cv2.arrowedLine(vis, (bx, by), (cmd_x, cmd_y), (255, 0, 255), 2)
-
-                            # Aggressive deceleration curve - ALWAYS move toward target
-                            if touch_gap > BRAKE_DISTANCE:
-                                # Far away: full speed
-                                speed = MAX_SPEED
-                                speed_zone = "FULL"
-                            elif touch_gap > BRAKE_DISTANCE * 0.6:
-                                # Medium distance: quadratic deceleration
-                                factor = (touch_gap - BRAKE_DISTANCE * 0.6) / (BRAKE_DISTANCE * 0.4)
-                                speed = int(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * (factor ** 2))
-                                speed_zone = "DECEL"
-                            elif touch_gap > TOUCH_DISTANCE:
-                                # Close: very slow, proportional to distance
-                                factor = max(0.2, touch_gap / (BRAKE_DISTANCE * 0.6))
-                                speed = int(MIN_SPEED * factor)
-                                speed_zone = "APPROACH"
-                            else:
-                                # Very close but still track! Use minimal speed to stay with target
-                                speed = max(8, int(MIN_SPEED * 0.3))  # Minimum 8 speed to keep tracking
-                                speed_zone = "TOUCH"
-                                status = "TOUCHING (tracking)"
-
-                            should_move = True
-                            if speed_zone != "TOUCH":
-                                status = f"CHASING {speed_zone} | Speed:{speed} | Dist:{int(touch_gap)}px"
-                            print(f"[CHASE] Zone:{speed_zone} Dist:{int(touch_gap)}px Speed:{speed} | Heading:{int(heading)}°")
-                        else:
-                            status = f"LOOKING FOR {TARGET_NAME}"
-                    else:
-                        status = "BALL LOST"
-
-                # ========== BALL LOSS RECOVERY ==========
-                if calib_state == "OPERATIONAL":
-                    if not ball_found:
-                        ball_lost_frames += 1
-
-                        # If just lost, remember what we were doing
-                        if ball_lost_frames == 1:
-                            last_command_before_lost = last_command_heading
-                            # Reverse direction to bring ball back
-                            recovery_heading = normalize_angle(last_command_heading + 180)
-                            print(f"[RECOVERY] Ball lost! Last cmd:{int(last_command_heading)}°, reversing to {int(recovery_heading)}°")
-
-                        # Execute recovery if ball lost for a few frames
-                        if ball_lost_frames > 10:
-                            heading = recovery_heading
-                            speed = 30  # Slow recovery speed
-                            should_move = True
-                            status = f"RECOVERY: Reversing {ball_lost_frames}f"
-                            print(f"[RECOVERY] Executing reverse heading: {int(recovery_heading)}°")
-
-                        # If lost for too long, restart calibration
-                        if ball_lost_frames > 100:
-                            print(f"[RECOVERY] Ball lost for {ball_lost_frames} frames. Restarting calibration...")
-                            calib_state = "INITIAL"
-                            calib_samples = []
-                            calibration_offset = 0.0
-                            status = "RECALIBRATING"
+                        status = f"ARRIVED ({goal_label})"
 
                     else:
-                        # Ball found again after being lost
-                        if ball_lost_frames > 10:
-                            # Use recovery to calibrate
-                            # We sent "recovery_heading" and ball appeared at current position
-                            # This tells us the actual direction
-                            print(f"[RECOVERY] Ball recovered after {ball_lost_frames} frames!")
+                        # --- BASE SPEED FROM DISTANCE ---
+                        if dist_to_goal > 3 * TARGET_REACHED_PIX:
+                            base_speed = MAX_SPEED
+                        else:
+                            frac = dist_to_goal / (3 * TARGET_REACHED_PIX)
+                            base_speed = int(MIN_SPEED + (MAX_SPEED - MIN_SPEED) * frac)
+                            base_speed = max(MIN_SPEED, min(MAX_SPEED, base_speed))
 
-                            # If we have a good position history, use it to refine calibration
-                            if last_pos:
-                                # Ball reappeared - check if recovery worked
-                                actual_angle = get_screen_angle(last_pos, (bx, by))
-                                expected_angle = normalize_angle(recovery_heading + calibration_offset)
-                                error = angle_diff(actual_angle, expected_angle)
+                        # --- VELOCITY-AWARE BRAKING ---
+                        if dist_to_goal > 1e-3:
+                            ux = dx / dist_to_goal  # unit vector toward target
+                            uy = dy / dist_to_goal
+                        else:
+                            ux, uy = 0.0, 0.0
 
-                                print(f"[RECOVERY CALIB] Recovery cmd:{int(recovery_heading)}° → Actual:{int(actual_angle)}° | Error:{int(error)}°")
+                        # Radial velocity toward target (px/s)
+                        v_r = est_vx * ux + est_vy * uy
 
-                                # Any error during recovery means offset needs adjustment
-                                if abs(error) > 3:  # Lower threshold from 10° to 3°
-                                    old_offset = calibration_offset
-                                    calibration_offset += 0.5 * error  # Very aggressive correction during recovery
-                                    calibration_offset = normalize_angle(calibration_offset)
-                                    print(f"[RECOVERY CALIB] Adjusted offset: {int(old_offset)}° → {int(calibration_offset)}°")
+                        # Stopping distance estimate
+                        d_stop = max(0.0, v_r) * BRAKE_TIME  # px
 
-                        # Reset recovery state
-                        ball_lost_frames = 0
-                        last_command_before_lost = None
-                        recovery_heading = None
+                        if d_stop >= dist_to_goal:
+                            # Too fast to stop in time: creep in
+                            speed_cmd = MIN_SPEED
+                        else:
+                            margin = dist_to_goal - d_stop
+                            margin_ratio = margin / max(dist_to_goal, 1e-6)
+                            # Don't drop below 30% of base_speed
+                            speed_cmd = int(base_speed * max(0.3, margin_ratio))
 
-                # 4. ACT
-                if should_move:
-                    droid.set_heading(int(heading))
-                    droid.set_speed(speed)
-                    last_command_heading = heading
-                    is_moving = True
+                        speed_cmd = max(MIN_SPEED, min(MAX_SPEED, speed_cmd))
+                        should_move = True
+                        status = f"CHASING {goal_label}"
+
+                    if target_found:
+                        cv2.circle(vis, (tx, ty), 20, (255, 255, 255), 2)
+                        cv2.putText(vis, goal_label, (tx+20, ty),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
+
+                # --- Runtime calibration refinement from movement ---
+                last_est_for_calib = (est_x, est_y)  # save for next iteration
+                if ball_found and heading_cmd is not None and last_speed > MIN_SPEED:
+                    # compare actual movement direction with expected heading
+                    if last_pos is not None:
+                        dx_moved = est_x - last_pos[0]
+                        dy_moved = est_y - last_pos[1]
+                        distm = math.sqrt(dx_moved*dx_moved + dy_moved*dy_moved)
+                        if distm > CALIB_MIN_MOVE_DIST:
+                            actual_ang = get_screen_angle(last_pos, (est_x, est_y))
+                            expected_ang = normalize_angle(last_command_heading + calibration_offset)
+                            err_ang = angle_diff(actual_ang, expected_ang)
+                            if abs(err_ang) < CALIB_MAX_ERR_TO_UPDATE:
+                                calibration_offset = normalize_angle(
+                                    calibration_offset + 0.07 * err_ang
+                                )
+
+                # --- Apply command & update latency-events ---
+                prev_speed_for_latency = last_speed_for_latency
+                last_speed_for_latency = speed_cmd
+
+                if should_move and heading_cmd is not None:
+                    droid.set_heading(int(heading_cmd))
+                    droid.set_speed(int(speed_cmd))
+                    last_command_heading = heading_cmd
+                    last_speed = speed_cmd
+
+                    # Start latency event if we just accelerated above threshold
+                    if (prev_speed_for_latency <= LATENCY_SPEED_EVENT_THRESHOLD and
+                        speed_cmd >= LATENCY_SPEED_EVENT_THRESHOLD and
+                        pending_latency_event is None):
+                        pending_latency_event = {
+                            "time": now,
+                            "x": est_x,
+                            "y": est_y
+                        }
                 else:
                     droid.set_speed(0)
-                    is_moving = False
+                    last_speed = 0
 
-                # 5. DRAW NEXT PREDICTED POSITION (if we just sent a command)
-                if should_move and ball_found and heading is not None:
-                    # Predict where ball will be next frame based on current command
-                    predicted_heading = normalize_angle(heading + calibration_offset)
-                    # Estimate distance moved per frame (rough approximation based on speed)
-                    est_dist = speed * 0.4  # Rough pixels per frame at given speed
-                    pred_rad = math.radians(predicted_heading)
-                    next_pred_x = int(bx + est_dist * math.sin(pred_rad))
-                    next_pred_y = int(by - est_dist * math.cos(pred_rad))
-
-                    # Draw prediction for next frame
-                    cv2.circle(vis, (next_pred_x, next_pred_y), 8, (0, 255, 255), 2)  # Cyan circle
-                    cv2.circle(vis, (next_pred_x, next_pred_y), 2, (0, 255, 255), -1)
-                    cv2.line(vis, (bx, by), (next_pred_x, next_pred_y), (0, 255, 255), 1)  # Dashed effect
-                    cv2.putText(vis, "Next", (next_pred_x + 10, next_pred_y),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-
-                # 6. UPDATE POSITION HISTORY (AFTER sending command)
-                # This way, next frame we can compare the movement that resulted from THIS command
-                if ball_found:
-                    last_pos = (bx, by)
+                # draw heading arrows from state estimate
+                if ball_found and heading_cmd is not None:
+                    # robot's "forward" (0° + offset)
+                    pred_ang = normalize_angle(0 + calibration_offset)
+                    rad_pred = math.radians(pred_ang)
+                    fx = int(est_x + 40 * math.sin(rad_pred))
+                    fy = int(est_y - 40 * math.cos(rad_pred))
+                    cv2.arrowedLine(vis, (int(est_x), int(est_y)), (fx, fy), COL_PRED_HEAD, 2)
+                    # command arrow
+                    cmd_rad = math.radians(heading_cmd)
+                    cx1 = int(est_x + 60 * math.sin(cmd_rad))
+                    cy1 = int(est_y - 60 * math.cos(cmd_rad))
+                    cv2.arrowedLine(vis, (int(est_x), int(est_y)), (cx1, cy1), COL_CMD_HEAD, 2)
 
                 # HUD
-                # Show testing mode indicator
-                mode_color = (255, 165, 0) if TESTING_MODE else (0, 255, 0)
-                mode_text = f"[TEST MODE: Hunting {TARGET_NAME}]" if TESTING_MODE else f"[CAT MODE]"
-                cv2.putText(vis, mode_text, (20, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, mode_color, 2)
+                cv2.putText(vis, status, (20, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, COL_TEXT, 2)
+                cv2.putText(vis, f"Calib offset: {int(calibration_offset)}°  "
+                            f"Latency: {int(latency_est*1000)}ms  "
+                            f"Scale: {px_per_speed_per_sec:.1f}px/s",
+                            (20, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
+                cv2.putText(vis, f"Dist goal: {int(dist_to_goal)}px",
+                            (20, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 1)
 
-                cv2.putText(vis, status, (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.8, COL_TEXT, 2)
+                cv2.imshow("Latency-Compensated Tracker", vis)
+                if cv2.waitKey(1) & 0xFF == ord('q'):
+                    break
 
-                # Calibration state and offset
-                state_color = (255, 165, 0) if calib_state != "OPERATIONAL" else (0, 255, 0) if calib_updated else (200, 200, 200)
-                cv2.putText(vis, f"State: {calib_state}", (20, 85),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
-                cv2.putText(vis, f"Calib Offset: {int(calibration_offset)}°", (20, 110),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, state_color, 2)
-
-                if calib_state == "TEST_MOVE":
-                    progress = int(calib_wait_frames / 40 * 100) if calib_wait_frames <= 40 else 100
-                    cv2.putText(vis, f"Samples: {len(calib_samples)} | Progress: {progress}%", (20, 135),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 165, 0), 1)
-                    # Draw circle path visualization (very small circle)
-                    cv2.circle(vis, (bx, by), 8, (255, 165, 0), 1)
-
-                cv2.putText(vis, f"Ball: {ball_tracker.frames_lost}f lost | {TARGET_NAME}: {cat_tracker.frames_lost}f lost",
-                            (20, 160), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-                cv2.putText(vis, f"Candidates: {len(candidates)}", (20, 185),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (150, 150, 150), 1)
-
-                # Show offset and speed info during chase
-                if calib_state == "OPERATIONAL" and should_move and 'speed_zone' in locals():
-                    zone_colors = {'FULL': (0, 255, 0), 'DECEL': (0, 255, 255), 'APPROACH': (0, 165, 255)}
-                    zone_color = zone_colors.get(speed_zone, (255, 255, 255))
-                    cv2.putText(vis, f"Zone: {speed_zone} | Speed: {speed}", (20, 210),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, zone_color, 2)
-                    cv2.putText(vis, f"Offset: {int(calibration_offset)}°", (20, 235),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-                # Show recovery status
-                if ball_lost_frames > 0:
-                    recovery_color = (0, 165, 255) if ball_lost_frames > 10 else (255, 255, 0)
-                    cv2.putText(vis, f"Ball Lost: {ball_lost_frames}f", (20, 265),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, recovery_color, 2)
-                    if recovery_heading is not None:
-                        cv2.putText(vis, f"Recovery Heading: {int(recovery_heading)}°", (20, 290),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, recovery_color, 1)
-
-                # Legend (only show in OPERATIONAL mode)
-                if calib_state == "OPERATIONAL":
-                    legend_y = h - 240
-                    cv2.putText(vis, "ZONES & PREDICTION:", (20, legend_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                    cv2.putText(vis, "Blue circle = Stop zone (80px)", (20, legend_y + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 0), 1)
-                    cv2.putText(vis, "Cyan circle (big) = Brake zone", (20, legend_y + 40), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                    cv2.putText(vis, "Cyan circle (small) = Next predicted", (20, legend_y + 60), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                    cv2.putText(vis, "Yellow circle = Last expected pos", (20, legend_y + 80), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-                    cv2.putText(vis, "Magenta line = Prediction error", (20, legend_y + 100), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
-                    cv2.putText(vis, "Green arrow = Desired direction", (20, legend_y + 120), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-                    cv2.putText(vis, "Magenta arrow = Sent command", (20, legend_y + 140), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 0, 255), 1)
-                    cv2.putText(vis, "Red arrow = Robot's 'forward'", (20, legend_y + 160), cv2.FONT_HERSHEY_SIMPLEX, 0.4, COL_PREDICTION, 1)
-                    cv2.putText(vis, "Yellow arrow = Expected heading", (20, legend_y + 180), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
-                    cv2.putText(vis, "Cyan arrow = Actual heading", (20, legend_y + 200), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 255), 1)
-                    cv2.putText(vis, "Orange arrow = Recovery", (20, legend_y + 220), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 165, 255), 1)
-
-                cv2.imshow("Continuous Tracker", vis)
-
-                if cv2.waitKey(1) & 0xFF == ord('q'): break
                 elapsed = time.time() - loop_start
-                if elapsed < LOOP_DELAY: time.sleep(LOOP_DELAY - elapsed)
+                if elapsed < LOOP_DELAY:
+                    time.sleep(max(0, LOOP_DELAY - elapsed))
 
-        except KeyboardInterrupt: pass
+        except KeyboardInterrupt:
+            print("Interrupted by user.")
         finally:
             droid.set_speed(0)
             cap.release()
             cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()
