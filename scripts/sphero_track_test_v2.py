@@ -40,6 +40,14 @@ from calibration_pomdp import (
     CalibState
 )
 
+from visibility_pomdp import (
+    build_visibility_agent,
+    discretize_visibility_obs,
+    VisAction,
+    VisObs,
+    VisState,
+)
+
 # ================= CONFIGURATION =================
 
 CAM_INDEX = 1
@@ -677,6 +685,12 @@ def main():
             "calib_belief_bad",
             "calib_obs",
             "calib_action",
+            # --- Visibility POMDP logging ---
+            "vis_belief_visible",
+            "vis_belief_occluded",
+            "vis_belief_gone",
+            "vis_obs",
+            "vis_action",
         ])
         print(f"[LOG] Logging to {log_filename}")
 
@@ -705,6 +719,12 @@ def main():
         calib_agent = build_calibration_agent()
         effective_max_speed = MAX_SPEED
         prev_safety_active = False
+
+        # --- Visibility / Occlusion POMDP setup ---
+        use_vis_pomdp = True
+        vis_agent = build_visibility_agent()
+        target_seen_frames = 0
+        target_lost_frames = 0
 
         print("--- VISION-BASED SERVO WITH ROBUST BALL DETECTION, SAFETY & LOGGING ---")
 
@@ -735,6 +755,13 @@ def main():
                 calib_belief_bad = float("nan")
                 calib_obs_idx = -1
                 calib_action_idx = -1
+
+                # --- Visibility POMDP logging defaults ---
+                vis_belief_visible = float("nan")
+                vis_belief_occluded = float("nan")
+                vis_belief_gone = float("nan")
+                vis_obs_idx = -1
+                vis_action_idx = -1
 
                 if ball_found:
                     # measurement velocities
@@ -794,6 +821,48 @@ def main():
                 else:
                     goal_x, goal_y = w // 2, h // 2
                     goal_label = "CENTER"
+
+                # --- Update visibility counters ---
+                if target_found:
+                    target_seen_frames += 1
+                    target_lost_frames = 0
+                else:
+                    target_lost_frames += 1
+
+                # --- Visibility POMDP (is the target gone or just occluded?) ---
+                if use_vis_pomdp:
+                    vis_obs_idx = discretize_visibility_obs(
+                        target_found=target_found,
+                        target_lost_frames=target_lost_frames,
+                    )
+                    qv = vis_agent.infer_states([vis_obs_idx])
+                    vis_agent.infer_policies()
+                    vis_action_idx = vis_agent.sample_action()[0]
+
+                    qv_state = qv[0]
+                    vis_belief_visible = float(qv_state[VisState.VISIBLE])
+                    vis_belief_occluded = float(qv_state[VisState.OCCLUDED])
+                    vis_belief_gone = float(qv_state[VisState.GONE])
+
+                    if loop_idx % 50 == 0:
+                        try:
+                            vis_obs_name = VisObs(vis_obs_idx).name
+                        except Exception:
+                            vis_obs_name = str(vis_obs_idx)
+                        try:
+                            vis_action_name = VisAction(vis_action_idx).name
+                        except Exception:
+                            vis_action_name = str(vis_action_idx)
+
+                        print(
+                            f"[VIS-POMDP] loop={loop_idx} "
+                            f"obs={vis_obs_name} action={vis_action_name} "
+                            f"belief=[VIS:{vis_belief_visible:.2f}, "
+                            f"OCC:{vis_belief_occluded:.2f}, "
+                            f"GONE:{vis_belief_gone:.2f}]"
+                        )
+                else:
+                    vis_action_idx = -1
 
                 # --- Runtime calibration refinement from movement ---
                 if last_est_for_calib is not None and last_command_heading is not None:
@@ -919,44 +988,52 @@ def main():
                     status = f"ARRIVED ({goal_label})"
 
                 else:
-                    # Desired direction to goal
-                    desired_screen_angle = get_screen_angle((est_x, est_y), (goal_x, goal_y))
-                    heading_cmd = normalize_angle(desired_screen_angle - calibration_offset)
-
-                    # --- Distance-first speed profile (POMDP-aware) ---
-                    if dist_to_goal > 4 * TARGET_REACHED_PIX:
-                        base_speed = effective_max_speed
-                    elif dist_to_goal > 2 * TARGET_REACHED_PIX:
-                        # ramp down from effective_max_speed to MIN as we go from 4R to 2R
-                        frac = (dist_to_goal - 2 * TARGET_REACHED_PIX) / (2 * TARGET_REACHED_PIX)
-                        frac = max(0.0, min(1.0, frac))
-                        base_speed = MIN_SPEED + (effective_max_speed - MIN_SPEED) * frac
+                    # If the target is NOT visible and visibility POMDP says WAIT,
+                    # then stay where we are and wait for it to re-appear.
+                    if use_vis_pomdp and (not target_found) and (vis_action_idx == VisAction.WAIT):
+                        speed_cmd = 0
+                        should_move = False
+                        status = "VIS: waiting (target likely occluded)"
                     else:
-                        base_speed = MIN_SPEED  # very close → creep
+                        # Desired direction to goal
+                        desired_screen_angle = get_screen_angle((est_x, est_y), (goal_x, goal_y))
+                        heading_cmd = normalize_angle(desired_screen_angle - calibration_offset)
 
-                    # --- Mild velocity-aware adjustment ---
-                    if dist_to_goal > 1e-3:
-                        ux = dx / dist_to_goal
-                        uy = dy / dist_to_goal
-                    else:
-                        ux, uy = 0.0, 0.0
+                        # --- Distance-first speed profile (POMDP-aware) ---
+                        if dist_to_goal > 4 * TARGET_REACHED_PIX:
+                            base_speed = effective_max_speed
+                        elif dist_to_goal > 2 * TARGET_REACHED_PIX:
+                            # ramp down from effective_max_speed to MIN as we go from 4R to 2R
+                            frac = (dist_to_goal - 2 * TARGET_REACHED_PIX) / (2 * TARGET_REACHED_PIX)
+                            frac = max(0.0, min(1.0, frac))
+                            base_speed = MIN_SPEED + (effective_max_speed - MIN_SPEED) * frac
+                        else:
+                            base_speed = MIN_SPEED  # very close → creep
 
-                    # Radial velocity toward goal (px/s)
-                    v_r = est_vx * ux + est_vy * uy
+                        # --- Mild velocity-aware adjustment ---
+                        if dist_to_goal > 1e-3:
+                            ux = dx / dist_to_goal
+                            uy = dy / dist_to_goal
+                        else:
+                            ux, uy = 0.0, 0.0
 
-                    T_BRAKE = 0.3
-                    d_stop = max(0.0, v_r) * T_BRAKE  # px
+                        # Radial velocity toward goal (px/s)
+                        v_r = est_vx * ux + est_vy * uy
 
-                    if d_stop > 0.5 * dist_to_goal:
-                        # approaching too fast, cut base speed in half
-                        speed_cmd = max(MIN_SPEED, int(base_speed * 0.5))
-                    else:
-                        speed_cmd = int(base_speed)
+                        T_BRAKE = 0.3
+                        d_stop = max(0.0, v_r) * T_BRAKE  # px
 
-                    speed_cmd = max(MIN_SPEED, min(effective_max_speed, speed_cmd))
+                        if d_stop > 0.5 * dist_to_goal:
+                            # approaching too fast, cut base speed in half
+                            speed_cmd = max(MIN_SPEED, int(base_speed * 0.5))
+                        else:
+                            speed_cmd = int(base_speed)
 
-                    should_move = True
-                    status = f"CHASING {goal_label}"
+                        speed_cmd = max(MIN_SPEED, min(effective_max_speed, speed_cmd))
+
+                        should_move = True
+                        status = f"CHASING {goal_label}"
+
 
                 # --- Apply command & update stuck ---
                 if should_move:
@@ -1012,6 +1089,11 @@ def main():
                     calib_belief_bad,
                     calib_obs_idx,
                     calib_action_idx,
+                    vis_belief_visible,
+                    vis_belief_occluded,
+                    vis_belief_gone,
+                    vis_obs_idx,
+                    vis_action_idx,
                 ])
                 if loop_idx % 20 == 0:
                     log_file.flush()
