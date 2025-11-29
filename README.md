@@ -105,7 +105,7 @@ The script creates an autonomous cat toy that:
          - Visibility observation bins & actions (TRACK vs WAIT).
 
 ## 🧩 Active Inference / POMDP Modules
-** 1. Calibration Confidence POMDP (scripts/calibration_pomdp.py) **
+1. ** Calibration Confidence POMDP (scripts/calibration_pomdp.py) **
 
 This module uses pymdp to maintain a small generative model over how well-calibrated the system is.
 
@@ -136,7 +136,7 @@ In the logs you’ll see lines like:
 indicating that the POMDP has inferred (mostly) DRIFT and is temporarily playing it safe.
 
 
-## 2. Visibility / Occlusion POMDP (scripts/visibility_pomdp.py)
+2. ** Visibility / Occlusion POMDP (scripts/visibility_pomdp.py) **
 
 This module reasons about whether the target is truly gone or just briefly occluded (e.g. behind furniture, out of YOLO’s view).
 
