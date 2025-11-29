@@ -19,6 +19,7 @@ sphero/
     visibility_pomdp.py       # Visibility / occlusion POMDP (Active Inference)
   sphero-experiments/     # Older prototypes, test scripts, archives
 
+``` 
 
 ## 🎯 Current Working System
 **Entry Script**
